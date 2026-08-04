@@ -1,1199 +1,1312 @@
-import 'dart:async';
-import 'dart:io';
-import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new/ffmpeg_session.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:screenshot/screenshot.dart';
-import '../../../core/services/recording_service.dart';
-import '../../../ui/app_theme.dart';
-import '../../../ui/gcs_widgets.dart';
+// import 'dart:async';
+// import 'dart:io';
+// import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+// import 'package:ffmpeg_kit_flutter_new/ffmpeg_session.dart';
+// import 'package:flutter/material.dart';
+// import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+// import 'package:google_fonts/google_fonts.dart';
+// import 'package:media_kit/media_kit.dart';
+// import 'package:media_kit_video/media_kit_video.dart';
+// import 'package:path_provider/path_provider.dart';
+// import 'package:screenshot/screenshot.dart';
+// import '../../../core/services/recording_service.dart';
+// import '../../../ui/app_theme.dart';
+// import '../../../ui/gcs_widgets.dart';
 
-class RecordSessionState {
-  FFmpegSession? session;
-  String url = '';
-  DateTime? chunkStartTime;
-  Duration accumulatedTime = Duration.zero;
-  int startNum = 0;
-  bool isRecording = false;
-  bool isPaused = false;
-}
+// class RecordSessionState {
+//   FFmpegSession? session;
+//   String url = '';
+//   DateTime? chunkStartTime;
+//   Duration accumulatedTime = Duration.zero;
+//   int startNum = 0;
+//   bool isRecording = false;
+//   bool isPaused = false;
+// }
 
-class GlobalRecordingManager {
-  static final Map<String, RecordSessionState> sessions = {};
-  static final Set<String> registeredFiles = {};
+// class GlobalRecordingManager {
+//   static final Map<String, RecordSessionState> sessions = {};
+//   static final Set<String> registeredFiles = {};
 
-  static bool isCameraRecording(String url) {
-    return sessions.values.any((s) => s.url == url && s.isRecording);
-  }
+//   static bool isCameraRecording(String url) {
+//     return sessions.values.any((s) => s.url == url && s.isRecording);
+//   }
 
-  static Future<void> stopAll() async {
-    for (var s in sessions.values) {
-      // saamplee
-      s.isRecording = false;
-      s.isPaused = false;
-      if (s.session != null) {
-        await FFmpegKit.cancel(s.session!.getSessionId());
-      }
-    }
-    sessions.clear();
-  }
-}
+//   static Future<void> stopAll() async {
+//     for (var s in sessions.values) {
+//       // saamplee
+//       s.isRecording = false;
+//       s.isPaused = false;
+//       if (s.session != null) {
+//         await FFmpegKit.cancel(s.session!.getSessionId());
+//       }
+//     }
+//     sessions.clear();
+//   }
+// }
 
-class GlobalStreamCache {
-  static final Map<String, Player> players = {};
-  static final Map<String, VideoController> controllers = {};
+// class GlobalStreamCache {
+//   static final Map<String, Player> players = {};
+//   static final Map<String, VideoController> controllers = {};
 
-  static String? get activeStreamUrl => players.keys.firstOrNull;
+//   static String? get activeStreamUrl => players.keys.firstOrNull;
 
-  static VideoController getController(String url) {
-    if (players.containsKey(url)) {
-      players[url]!.play();
-      return controllers[url]!;
-    }
+//   static VideoController getController(String url) {
+//     if (players.containsKey(url)) {
+//       players[url]!.play();
+//       return controllers[url]!;
+//     }
 
-    final player = Player(
-      configuration: const PlayerConfiguration(
-        bufferSize: 1024 * 1024 * 4,
-        logLevel: MPVLogLevel.error,
-      ),
-    );
+//     final player = Player(
+//       configuration: const PlayerConfiguration(
+//         bufferSize: 1024 * 1024 * 4,
+//         logLevel: MPVLogLevel.error,
+//       ),
+//     );
 
-    final controller = VideoController(player);
+//     final controller = VideoController(player);
 
-    try {
-      final mpv = player.platform as dynamic;
-      mpv.setProperty('audio', 'no');
-      mpv.setProperty('hwdec', 'no');
-      mpv.setProperty('network-timeout', '15');
-      mpv.setProperty('cache-pause', 'no');
-      mpv.setProperty('rtsp-transport', 'tcp');
-      mpv.setProperty('demuxer-lavf-probesize', '5000000'); // 5MB
-      mpv.setProperty('demuxer-lavf-analyzeduration', '5000000'); // 5ms
+//     try {
+//       final mpv = player.platform as dynamic;
+//       mpv.setProperty('audio', 'no');
+//       mpv.setProperty('hwdec', 'no');
+//       mpv.setProperty('network-timeout', '15');
+//       mpv.setProperty('cache-pause', 'no');
+//       mpv.setProperty('rtsp-transport', 'tcp');
+//       mpv.setProperty('demuxer-lavf-probesize', '5000000'); // 5MB
+//       mpv.setProperty('demuxer-lavf-analyzeduration', '5000000'); // 5ms
       
-    } catch (e) {
-      debugPrint("MPV Config Error: $e");
-    }
-
-    // 👉 DEBUG: log everything about this stream's lifecycle
-    player.stream.error.listen((e) => debugPrint("🔥 [$url] ERROR: $e"));
-    player.stream.width.listen((w) => debugPrint("📐 [$url] Width: $w"));
-    player.stream.height.listen((h) => debugPrint("📐 [$url] Height: $h"));
-    player.stream.playing.listen((p) => debugPrint("▶️ [$url] Playing: $p"));
-    player.stream.buffering.listen((b) => debugPrint("⏳ [$url] Buffering: $b"));
-
-    debugPrint("🎬 [$url] Attempting to open stream...");
-    player.open(Media(url), play: true);
-    players[url] = player;
-    controllers[url] = controller;
-
-    return controller;
-  }
-
-  // 👉 NEW: release just ONE stream (used when a camera's IP/URL changes).
-  // Skips disposal if that URL is currently being recorded, so an
-  // in-progress FFmpeg capture is never interrupted.
-  static Future<void> releaseStream(String url) async {
-    if (url.isEmpty) return;
-    if (GlobalRecordingManager.isCameraRecording(url)) {
-      debugPrint("⚠️ Skipping release for $url — recording in progress.");
-      return;
-    }
-    final player = players.remove(url);
-    controllers.remove(url);
-    if (player != null) {
-      debugPrint("🗑️ Releasing stream for $url");
-      await player.dispose();
-    }
-  }
-
-  static Future<void> releaseAll() async {
-    if (GlobalRecordingManager.sessions.values.any((s) => s.isRecording)) {
-      return;
-    }
-
-    for (var p in players.values) {
-      p.dispose();
-    }
-    players.clear();
-    controllers.clear();
-    FlutterForegroundTask.stopService();
-  }
-}
-
-class CameraView extends StatefulWidget {
-  final String url;
-  final String label;
-  final String taskName;
-  final int faceNumber;
-  final Function(String, DateTime, String, bool, String)? onSnapshot;
-  final Function(String, DateTime, String)? onVideoRecorded;
-
-  const CameraView({
-    super.key,
-    required this.url,
-    required this.label,
-    required this.taskName,
-    this.faceNumber = 1,
-    this.onSnapshot,
-    this.onVideoRecorded,
-  });
-
-  @override
-  State<CameraView> createState() => _CameraViewState();
-}
-
-class _CameraViewState extends State<CameraView>
-    with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
-  final ScreenshotController _smallController = ScreenshotController();
-  final ScreenshotController _fsController = ScreenshotController();
-
-  final ValueNotifier<bool> _isRecording = ValueNotifier(false);
-  final ValueNotifier<bool> _isPaused = ValueNotifier(false);
-  final ValueNotifier<String> _timerText = ValueNotifier("00:00:00");
-
-  bool _isTakingSnap = false;
-
-  // 👉 FIX: no longer `late final` — must be reassignable when the URL changes.
-  VideoController? controller;
-  String? _boundUrl; // tracks which URL `controller` currently points to
-
-  bool isError = false;
-  bool _isStreamReady = false;
-
-  Timer? _uiTimer;
-  Timer? _chunkScannerTimer;
-  String? _lastKnownRecordingPath;
-
-  RecordSessionState get session {
-    if (!GlobalRecordingManager.sessions.containsKey(widget.label)) {
-      GlobalRecordingManager.sessions[widget.label] = RecordSessionState();
-    }
-    return GlobalRecordingManager.sessions[widget.label]!;
-  }
-
-  @override
-  bool get wantKeepAlive => true;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _recoverRecordingState();
-    _startTimers();
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      Future.delayed(const Duration(milliseconds: 300), () {
-        if (mounted) _initStream();
-      });
-    });
-  }
-
-  @override
-  void didUpdateWidget(covariant CameraView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.url != oldWidget.url) {
-      _switchStream(oldWidget.url);
-    }
-  }
-
-  Future<void> _switchStream(String oldUrl) async {
-    debugPrint("🔁 [${widget.label}] URL changed: $oldUrl -> ${widget.url}");
-
-    // Release the old stream first (unless it's actively recording)
-    if (oldUrl.isNotEmpty) {
-      await GlobalStreamCache.releaseStream(oldUrl);
-    }
-
-    if (!mounted) return;
-    setState(() {
-      _isStreamReady = false;
-      isError = false;
-      controller = null;
-    });
-
-    _initStream();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _isStreamReady && mounted) {
-      controller?.player.play();
-    }
-  }
-
-  void _startTimers() {
-    _uiTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      final s = session;
-      if (s.isRecording) {
-        Duration d = s.accumulatedTime;
-        if (!s.isPaused && s.chunkStartTime != null) {
-          d += DateTime.now().difference(s.chunkStartTime!);
-        }
-        String h = d.inHours.toString().padLeft(2, '0');
-        String m = (d.inMinutes % 60).toString().padLeft(2, '0');
-        String sec = (d.inSeconds % 60).toString().padLeft(2, '0');
-        _timerText.value = "$h:$m:$sec";
-      }
-    });
-
-    // The scanner runs every 15 seconds and registers ALL files immediately
-    // so you don't have to wait to see the video appear in the UI.
-    _chunkScannerTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
-      if (session.isRecording) {
-        await _registerCompletedChunks(onlyFinished: false);
-      }
-    });
-  }
-
-  void _initStream() {
-    if (widget.url.isNotEmpty && mounted) {
-      try {
-        final newController = GlobalStreamCache.getController(widget.url);
-        _boundUrl = widget.url;
-        setState(() {
-          controller = newController;
-          isError = false;
-          _isStreamReady = true;
-        });
-      } catch (e) {
-        setState(() {
-          isError = true;
-          _isStreamReady = true;
-        });
-      }
-    } else {
-      if (mounted) {
-        setState(() {
-          controller = null;
-          _boundUrl = null;
-          _isStreamReady = true;
-        });
-      }
-    }
-  }
-
-  void _recoverRecordingState() {
-    final s = session;
-    if ((s.isRecording || s.isPaused) && s.url == widget.url) {
-      _isRecording.value = s.isRecording;
-      _isPaused.value = s.isPaused;
-    }
-  }
-
-  Future<int> _getNextSequenceNumber(String dirPath, String basePrefix) async {
-    final dir = Directory(dirPath);
-    int maxNum = -1;
-    if (await dir.exists()) {
-      final files = dir.listSync();
-      for (var file in files) {
-        final name = file.path.split(Platform.pathSeparator).last;
-        if (name.startsWith(basePrefix) && name.endsWith('.ts')) {
-          final match = RegExp(r'_(\d{3})\.ts$').firstMatch(name);
-          if (match != null) {
-            final num = int.tryParse(match.group(1)!) ?? -1;
-            if (num > maxNum) maxNum = num;
-          }
-        }
-      }
-    }
-    return maxNum + 1;
-  }
-
-  Future<String?> _getLatestCompletedRecordingPath() async {
-    try {
-      for (var attempt = 0; attempt < 3; attempt++) {
-        final dir = await getApplicationDocumentsDirectory();
-        final safeTaskName = widget.taskName
-            .replaceAll('/', '-')
-            .replaceAll('\\', '-')
-            .replaceAll('"', '')
-            .replaceAll("'", '')
-            .replaceAll(':', '');
-            // saample
-        final safeLabel = widget.label.replaceAll(' ', '_');
-        final basePrefix = '$safeTaskName Face ${widget.faceNumber} $safeLabel vid';
-
-        final matchedFiles = dir
-            .listSync(recursive: true, followLinks: false)
-            .whereType<File>()
-            .where((file) {
-              final name = file.path.split(Platform.pathSeparator).last;
-              return name.startsWith(basePrefix) &&
-                  name.endsWith('.ts') &&
-                  file.existsSync() &&
-                  file.lengthSync() > 0;
-            })
-            .toList();
-
-        if (matchedFiles.isNotEmpty) {
-          matchedFiles.sort((a, b) {
-            final aName = a.path.split(Platform.pathSeparator).last;
-            final bName = b.path.split(Platform.pathSeparator).last;
-            final aMatch = RegExp(r'_(\d{3})\.ts$').firstMatch(aName);
-            final bMatch = RegExp(r'_(\d{3})\.ts$').firstMatch(bName);
-            final aNum = int.tryParse(aMatch?.group(1) ?? '') ?? -1;
-            final bNum = int.tryParse(bMatch?.group(1) ?? '') ?? -1;
-
-            if (aNum != bNum) {
-              return aNum.compareTo(bNum);
-            }
-            return a.lastModifiedSync().compareTo(b.lastModifiedSync());
-          });
-
-          final latestPath = matchedFiles.last.path;
-          _lastKnownRecordingPath = latestPath;
-          return latestPath;
-        }
-
-        if (_lastKnownRecordingPath != null) {
-          final fallbackFile = File(_lastKnownRecordingPath!);
-          if (fallbackFile.existsSync() && fallbackFile.lengthSync() > 0) {
-            return _lastKnownRecordingPath;
-          }
-        }
-
-        if (attempt < 2) {
-          await Future.delayed(const Duration(milliseconds: 800));
-        }
-      }
-
-      return null;
-    } catch (e) {
-      debugPrint('Recording path lookup error: $e');
-      return null;
-    }
-  }
-
-  Future<void> _registerCompletedChunks({required bool onlyFinished}) async {
-    try {
-      final dir = await getApplicationDocumentsDirectory();
-
-      // Sanitize task name fully to prevent FFmpeg crashes
-      final safeTaskName = widget.taskName
-          .replaceAll('/', '-')
-          .replaceAll('\\', '-')
-          .replaceAll('"', '')
-          .replaceAll("'", '')
-          .replaceAll(':', '');
-          // saample
-      final safeLabel = widget.label.replaceAll(' ', '_');
-
-      final basePrefix = '$safeTaskName Face ${widget.faceNumber} $safeLabel vid';
-      final files = dir.listSync();
-      List<File> matchedFiles = [];
-
-      for (var file in files) {
-        final name = file.path.split(Platform.pathSeparator).last;
-        if (name.startsWith(basePrefix) && name.endsWith('.ts')) {
-          matchedFiles.add(File(file.path));
-        }
-      }
-
-      if (matchedFiles.isEmpty) return;
-
-      // Sort by path name instead of modify time. Much more reliable for chunks.
-      matchedFiles.sort((a, b) => a.path.compareTo(b.path));
-
-      int cutoff = onlyFinished ? matchedFiles.length - 1 : matchedFiles.length;
-
-      for (int i = 0; i < cutoff; i++) {
-        String path = matchedFiles[i].path;
-        if (!GlobalRecordingManager.registeredFiles.contains(path)) {
-          try {
-            if (matchedFiles[i].lengthSync() > 0) {
-              GlobalRecordingManager.registeredFiles.add(path);
-              _lastKnownRecordingPath = path;
-              widget.onVideoRecorded?.call(
-                path,
-                matchedFiles[i].lastModifiedSync(),
-                widget.label,
-              );
-            }
-          } catch (fileError) {
-            debugPrint("File access error for $path: $fileError");
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint("Scanner Error: $e");
-    }
-  }
-
-  Future<void> _startOrResumeRecording({VoidCallback? updateDialog}) async {
-    final s = session;
-    if (s.isRecording && !s.isPaused) return;
-
-    try {
-      if (Platform.isAndroid) {
-        if (await FlutterForegroundTask.checkNotificationPermission() !=
-            NotificationPermission.granted) {
-          await FlutterForegroundTask.requestNotificationPermission();
-        }
-        if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
-          await FlutterForegroundTask.requestIgnoreBatteryOptimization();
-        }
-      }
-
-      final dir = await getApplicationDocumentsDirectory();
-      final safeTaskName = widget.taskName
-          .replaceAll('/', '-')
-          .replaceAll('\\', '-')
-          .replaceAll('"', '')
-          .replaceAll("'", '')
-          .replaceAll(':', '');
-          // saample
-      final safeLabel = widget.label.replaceAll(' ', '_');
-
-      final basePrefix = '$safeTaskName Face ${widget.faceNumber} $safeLabel vid';
-
-      final startNum = await _getNextSequenceNumber(dir.path, basePrefix);
-      final segmentPattern = '${dir.path}/${basePrefix}_%03d.ts'.replaceAll(
-        '\\',
-        '/',
-      );
-
-      if (Platform.isAndroid && !await FlutterForegroundTask.isRunningService) {
-        await FlutterForegroundTask.startService(
-          notificationTitle: 'Vivid GCS Recording',
-          notificationText: 'Background stream active...',
-          callback: startCallback,
-        );
-      }
-
-      s.url = widget.url;
-      if (!s.isRecording) s.startNum = startNum;
-      s.chunkStartTime = DateTime.now();
-      s.isRecording = true;
-      s.isPaused = false;
-      _isRecording.value = true;
-      _isPaused.value = false;
-
-      // START THE AUTO-HEALER
-      _spawnFFmpegProcess(s, segmentPattern, startNum);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Recording Started (Stream Copy Active)',
-              style: GoogleFonts.jetBrainsMono(fontSize: 12),
-            ),
-            backgroundColor: AppTheme.green,
-          ),
-        );
-      }
-      updateDialog?.call();
-
-      // Trigger an immediate scan 2 seconds later so it pops up in the UI quickly
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) _registerCompletedChunks(onlyFinished: false);
-      });
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed: $e'), backgroundColor: AppTheme.red),
-        );
-      }
-    }
-  }
-
-  void _spawnFFmpegProcess(
-    RecordSessionState s,
-    String segmentPattern,
-    int currentStartNum,
-  ) async {
-    if (!s.isRecording || s.isPaused) return;
-
-    // -stimeout 10000000 (10 seconds) prevents instant crashes.
-    // -c:v copy (Stream Copy) prevents the CPU from melting and failing the render.
-    final command =
-    // saamplee
-    '-y -timeout 10000000 -i "${widget.url}" '
-        // '-y -stimeout 10000000 -i "${widget.url}" '
-        '-c:v copy -an '
-        '-fflags +genpts -f segment -segment_time 900 -segment_start_number $currentStartNum -reset_timestamps 1 "$segmentPattern"';
-
-    s.session = await FFmpegKit.executeAsync(command, (finishedSession) async {
-      if (s.isRecording && !s.isPaused) {
-        debugPrint(
-          " RTSP STREAM HUNG! FFmpeg timed out. Auto-healing in 2 seconds...",
-        );
-
-        await Future.delayed(const Duration(seconds: 2));
-
-        final dir = await getApplicationDocumentsDirectory();
-        final safeTaskName = widget.taskName
-            .replaceAll('/', '-')
-            .replaceAll('\\', '-')
-            .replaceAll('"', '')
-            .replaceAll("'", '')
-            .replaceAll(':', '');
-            // saamplee
-        final safeLabel = widget.label.replaceAll(' ', '_');
-        final basePrefix = '$safeTaskName Face ${widget.faceNumber}  $safeLabel vid';
-        final nextNum = await _getNextSequenceNumber(dir.path, basePrefix);
-
-        _spawnFFmpegProcess(s, segmentPattern, nextNum);
-      }
-    });
-  }
-
-  Future<void> _pauseRecording({VoidCallback? updateDialog}) async {
-    final s = session;
-    if (s.session != null) {
-      await FFmpegKit.cancel(s.session!.getSessionId());
-      s.session = null;
-    }
-
-    if (s.chunkStartTime != null) {
-      s.accumulatedTime += DateTime.now().difference(s.chunkStartTime!);
-    }
-    s.isPaused = true;
-    _isPaused.value = true;
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Recording Paused. Finalizing chunk...',
-            style: GoogleFonts.jetBrainsMono(fontSize: 12),
-          ),
-          backgroundColor: AppTheme.amber,
-        ),
-      );
-    }
-    await Future.delayed(const Duration(milliseconds: 200));
-    await _registerCompletedChunks(onlyFinished: false);
-    updateDialog?.call();
-  }
-
-  Future<void> _stopEntirely({VoidCallback? updateDialog}) async {
-    try {
-      final s = session;
-      // saamplee
-      s.isRecording = false;
-      s.isPaused = false;
-      if (s.session != null) {
-        await FFmpegKit.cancel(s.session!.getSessionId());
-      }
-
-      GlobalRecordingManager.sessions.remove(widget.label);
-      if (!GlobalRecordingManager.sessions.values.any(
-        (sess) => sess.isRecording,
-      )) {
-        await FlutterForegroundTask.stopService();
-      }
-
-      _isRecording.value = false;
-      _isPaused.value = false;
-      _timerText.value = "00:00:00";
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Finalizing Video Chunks...',
-              style: GoogleFonts.jetBrainsMono(
-                fontSize: 12,
-                color: AppTheme.textHi,
-              ),
-            ),
-            backgroundColor: AppTheme.amber,
-            duration: const Duration(seconds: 1),
-          ),
-        );
+//     } catch (e) {
+//       debugPrint("MPV Config Error: $e");
+//     }
+
+//     // 👉 DEBUG: log everything about this stream's lifecycle
+//     player.stream.error.listen((e) => debugPrint("🔥 [$url] ERROR: $e"));
+//     player.stream.width.listen((w) => debugPrint("📐 [$url] Width: $w"));
+//     player.stream.height.listen((h) => debugPrint("📐 [$url] Height: $h"));
+//     player.stream.playing.listen((p) => debugPrint("▶️ [$url] Playing: $p"));
+//     player.stream.buffering.listen((b) => debugPrint("⏳ [$url] Buffering: $b"));
+
+//     debugPrint("🎬 [$url] Attempting to open stream...");
+//     player.open(Media(url), play: true);
+//     players[url] = player;
+//     controllers[url] = controller;
+
+//     return controller;
+//   }
+
+//   // 👉 NEW: release just ONE stream (used when a camera's IP/URL changes).
+//   // Skips disposal if that URL is currently being recorded, so an
+//   // in-progress FFmpeg capture is never interrupted.
+//   static Future<void> releaseStream(String url) async {
+//     if (url.isEmpty) return;
+//     if (GlobalRecordingManager.isCameraRecording(url)) {
+//       debugPrint("⚠️ Skipping release for $url — recording in progress.");
+//       return;
+//     }
+//     final player = players.remove(url);
+//     controllers.remove(url);
+//     if (player != null) {
+//       debugPrint("🗑️ Releasing stream for $url");
+//       await player.dispose();
+//     }
+//   }
+
+//   static Future<void> releaseAll() async {
+//     if (GlobalRecordingManager.sessions.values.any((s) => s.isRecording)) {
+//       return;
+//     }
+
+//     for (var p in players.values) {
+//       p.dispose();
+//     }
+//     players.clear();
+//     controllers.clear();
+//     FlutterForegroundTask.stopService();
+//   }
+// }
+
+// class CameraView extends StatefulWidget {
+//   final String url;
+//   final String label;
+//   final String taskName;
+//   final int faceNumber;
+//   final Function(String, DateTime, String, bool, String)? onSnapshot;
+//   final Function(String, DateTime, String)? onVideoRecorded;
+
+//   const CameraView({
+//     super.key,
+//     required this.url,
+//     required this.label,
+//     required this.taskName,
+//     this.faceNumber = 1,
+//     this.onSnapshot,
+//     this.onVideoRecorded,
+//   });
+
+//   @override
+//   State<CameraView> createState() => _CameraViewState();
+// }
+
+// class _CameraViewState extends State<CameraView>
+//     with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
+//   final ScreenshotController _smallController = ScreenshotController();
+//   final ScreenshotController _fsController = ScreenshotController();
+
+//   final ValueNotifier<bool> _isRecording = ValueNotifier(false);
+//   final ValueNotifier<bool> _isPaused = ValueNotifier(false);
+//   final ValueNotifier<String> _timerText = ValueNotifier("00:00:00");
+
+//   bool _isTakingSnap = false;
+
+//   // 👉 FIX: no longer `late final` — must be reassignable when the URL changes.
+//   VideoController? controller;
+//   String? _boundUrl; // tracks which URL `controller` currently points to
+
+//   bool isError = false;
+//   bool _isStreamReady = false;
+
+//   Timer? _uiTimer;
+//   Timer? _chunkScannerTimer;
+//   String? _lastKnownRecordingPath;
+
+//   RecordSessionState get session {
+//     if (!GlobalRecordingManager.sessions.containsKey(widget.label)) {
+//       GlobalRecordingManager.sessions[widget.label] = RecordSessionState();
+//     }
+//     return GlobalRecordingManager.sessions[widget.label]!;
+//   }
+
+//   @override
+//   bool get wantKeepAlive => true;
+
+//   @override
+//   void initState() {
+//     super.initState();
+//     WidgetsBinding.instance.addObserver(this);
+//     _recoverRecordingState();
+//     _startTimers();
+
+//     WidgetsBinding.instance.addPostFrameCallback((_) {
+//       Future.delayed(const Duration(milliseconds: 300), () {
+//         if (mounted) _initStream();
+//       });
+//     });
+//   }
+
+//   @override
+//   void didUpdateWidget(covariant CameraView oldWidget) {
+//     super.didUpdateWidget(oldWidget);
+//     if (widget.url != oldWidget.url) {
+//       _switchStream(oldWidget.url);
+//     }
+//   }
+
+//   Future<void> _switchStream(String oldUrl) async {
+//     debugPrint("🔁 [${widget.label}] URL changed: $oldUrl -> ${widget.url}");
+
+//     // Release the old stream first (unless it's actively recording)
+//     if (oldUrl.isNotEmpty) {
+//       await GlobalStreamCache.releaseStream(oldUrl);
+//     }
+
+//     if (!mounted) return;
+//     setState(() {
+//       _isStreamReady = false;
+//       isError = false;
+//       controller = null;
+//     });
+
+//     _initStream();
+//   }
+
+//   @override
+//   void didChangeAppLifecycleState(AppLifecycleState state) {
+//     if (state == AppLifecycleState.resumed && _isStreamReady && mounted) {
+//       controller?.player.play();
+//     }
+//   }
+
+//   void _startTimers() {
+//     _uiTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+//       if (!mounted) return;
+//       final s = session;
+//       if (s.isRecording) {
+//         Duration d = s.accumulatedTime;
+//         if (!s.isPaused && s.chunkStartTime != null) {
+//           d += DateTime.now().difference(s.chunkStartTime!);
+//         }
+//         String h = d.inHours.toString().padLeft(2, '0');
+//         String m = (d.inMinutes % 60).toString().padLeft(2, '0');
+//         String sec = (d.inSeconds % 60).toString().padLeft(2, '0');
+//         _timerText.value = "$h:$m:$sec";
+//       }
+//     });
+
+//     // The scanner runs every 15 seconds and registers ALL files immediately
+//     // so you don't have to wait to see the video appear in the UI.
+//     _chunkScannerTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
+//       if (session.isRecording) {
+//         await _registerCompletedChunks(onlyFinished: true);
+//       }
+//     });
+//   }
+
+//   void _initStream() {
+//     if (widget.url.isNotEmpty && mounted) {
+//       try {
+//         final newController = GlobalStreamCache.getController(widget.url);
+//         _boundUrl = widget.url;
+//         setState(() {
+//           controller = newController;
+//           isError = false;
+//           _isStreamReady = true;
+//         });
+//       } catch (e) {
+//         setState(() {
+//           isError = true;
+//           _isStreamReady = true;
+//         });
+//       }
+//     } else {
+//       if (mounted) {
+//         setState(() {
+//           controller = null;
+//           _boundUrl = null;
+//           _isStreamReady = true;
+//         });
+//       }
+//     }
+//   }
+
+//   void _recoverRecordingState() {
+//     final s = session;
+//     if ((s.isRecording || s.isPaused) && s.url == widget.url) {
+//       _isRecording.value = s.isRecording;
+//       _isPaused.value = s.isPaused;
+//     }
+//   }
+
+//   Future<int> _getNextSequenceNumber(String dirPath, String basePrefix) async {
+//     final dir = Directory(dirPath);
+//     int maxNum = -1;
+//     if (await dir.exists()) {
+//       final files = dir.listSync();
+//       for (var file in files) {
+//         final name = file.path.split(Platform.pathSeparator).last;
+//         // sample1
+//         if (name.startsWith(basePrefix) && name.endsWith('.ts') && !name.contains('_merged_')) {
+//           final match = RegExp(r'_(\d{3})\.ts$').firstMatch(name);
+//           if (match != null) {
+//             final num = int.tryParse(match.group(1)!) ?? -1;
+//             if (num > maxNum) maxNum = num;
+//           }
+//         }
+//       }
+//     }
+//     return maxNum + 1;
+//   }
+
+//   Future<String?> _getLatestCompletedRecordingPath() async {
+//     try {
+//       for (var attempt = 0; attempt < 3; attempt++) {
+//         final dir = await getApplicationDocumentsDirectory();
+//         final safeTaskName = widget.taskName
+//             .replaceAll('/', '-')
+//             .replaceAll('\\', '-')
+//             .replaceAll('"', '')
+//             .replaceAll("'", '')
+//             .replaceAll(':', '');
+//             // saample
+//         final safeLabel = widget.label.replaceAll(' ', '_');
+//         final basePrefix = '$safeTaskName Face ${widget.faceNumber} $safeLabel vid';
+
+//         final matchedFiles = dir
+//             .listSync(recursive: true, followLinks: false)
+//             .whereType<File>()
+//             .where((file) {
+//               final name = file.path.split(Platform.pathSeparator).last;
+//               return name.startsWith(basePrefix) &&
+//                   name.endsWith('.ts') &&
+//                   // sample1
+//                   !name.contains('_merged_') &&
+//                   file.existsSync() &&
+//                   file.lengthSync() > 0;
+//             })
+//             .toList();
+
+//         if (matchedFiles.isNotEmpty) {
+//           matchedFiles.sort((a, b) {
+//             final aName = a.path.split(Platform.pathSeparator).last;
+//             final bName = b.path.split(Platform.pathSeparator).last;
+//             final aMatch = RegExp(r'_(\d{3})\.ts$').firstMatch(aName);
+//             final bMatch = RegExp(r'_(\d{3})\.ts$').firstMatch(bName);
+//             final aNum = int.tryParse(aMatch?.group(1) ?? '') ?? -1;
+//             final bNum = int.tryParse(bMatch?.group(1) ?? '') ?? -1;
+
+//             if (aNum != bNum) {
+//               return aNum.compareTo(bNum);
+//             }
+//             return a.lastModifiedSync().compareTo(b.lastModifiedSync());
+//           });
+
+//           final latestPath = matchedFiles.last.path;
+//           _lastKnownRecordingPath = latestPath;
+//           return latestPath;
+//         }
+
+//         if (_lastKnownRecordingPath != null) {
+//           final fallbackFile = File(_lastKnownRecordingPath!);
+//           if (fallbackFile.existsSync() && fallbackFile.lengthSync() > 0) {
+//             return _lastKnownRecordingPath;
+//           }
+//         }
+
+//         if (attempt < 2) {
+//           await Future.delayed(const Duration(milliseconds: 800));
+//         }
+//       }
+
+//       return null;
+//     } catch (e) {
+//       debugPrint('Recording path lookup error: $e');
+//       return null;
+//     }
+//   }
+
+//   Future<void> _registerCompletedChunks({required bool onlyFinished}) async {
+//     try {
+//       final dir = await getApplicationDocumentsDirectory();
+
+//       // Sanitize task name fully to prevent FFmpeg crashes
+//       final safeTaskName = widget.taskName
+//           .replaceAll('/', '-')
+//           .replaceAll('\\', '-')
+//           .replaceAll('"', '')
+//           .replaceAll("'", '')
+//           .replaceAll(':', '');
+//           // saample
+//       final safeLabel = widget.label.replaceAll(' ', '_');
+
+//       final basePrefix = '$safeTaskName Face ${widget.faceNumber} $safeLabel vid';
+//       final files = dir.listSync();
+//       List<File> matchedFiles = [];
+
+//       for (var file in files) {
+//         final name = file.path.split(Platform.pathSeparator).last;
+//         if (name.startsWith(basePrefix) && name.endsWith('.ts') && !name.contains('_merged_')) {
+//           matchedFiles.add(File(file.path));
+//         }
+//       }
+
+//       if (matchedFiles.isEmpty) return;
+
+//       // Sort by path name instead of modify time. Much more reliable for chunks.
+//       matchedFiles.sort((a, b) => a.path.compareTo(b.path));
+
+//       int cutoff = onlyFinished ? matchedFiles.length - 1 : matchedFiles.length;
+
+//       for (int i = 0; i < cutoff; i++) {
+//         String path = matchedFiles[i].path;
+//         if (!GlobalRecordingManager.registeredFiles.contains(path)) {
+//           try {
+//             if (matchedFiles[i].lengthSync() > 0) {
+//               GlobalRecordingManager.registeredFiles.add(path);
+//               _lastKnownRecordingPath = path;
+//               widget.onVideoRecorded?.call(
+//                 path,
+//                 matchedFiles[i].lastModifiedSync(),
+//                 widget.label,
+//               );
+//             }
+//           } catch (fileError) {
+//             debugPrint("File access error for $path: $fileError");
+//           }
+//         }
+//       }
+//     } catch (e) {
+//       debugPrint("Scanner Error: $e");
+//     }
+//   }
+//   Future<String?> _mergeChunksIntoSingleFile() async {
+//   try {
+//     final dir = await getApplicationDocumentsDirectory();
+//     final safeTaskName = widget.taskName
+//         .replaceAll('/', '-')
+//         .replaceAll('\\', '-')
+//         .replaceAll('"', '')
+//         .replaceAll("'", '')
+//         .replaceAll(':', '');
+//     final safeLabel = widget.label.replaceAll(' ', '_');
+//     final basePrefix = '$safeTaskName Face ${widget.faceNumber} $safeLabel vid';
+
+//     // Find all chunk files for this session
+//     final matchedFiles = dir
+//         .listSync()
+//         .whereType<File>()
+//         .where((file) {
+//           final name = file.path.split(Platform.pathSeparator).last;
+//           return name.startsWith(basePrefix) &&
+//               name.endsWith('.ts') &&
+//               // sample1
+//               !name.contains('_merged_') &&
+//               file.existsSync() &&
+//               file.lengthSync() > 0;
+//         })
+//         .toList();
+
+//     if (matchedFiles.isEmpty) return null;
+
+//     // Sort by chunk number
+//     matchedFiles.sort((a, b) {
+//       final aName = a.path.split(Platform.pathSeparator).last;
+//       final bName = b.path.split(Platform.pathSeparator).last;
+//       final aMatch = RegExp(r'_(\d{3})\.ts$').firstMatch(aName);
+//       final bMatch = RegExp(r'_(\d{3})\.ts$').firstMatch(bName);
+//       final aNum = int.tryParse(aMatch?.group(1) ?? '') ?? -1;
+//       final bNum = int.tryParse(bMatch?.group(1) ?? '') ?? -1;
+//       return aNum.compareTo(bNum);
+//     });
+
+//     // If there's only one chunk, no need to merge — just use it directly
+//     if (matchedFiles.length == 1) {
+//       final singleFile = matchedFiles.first;
+//       final timestamp = DateTime.now().millisecondsSinceEpoch;
+//       final taggedPath = '${dir.path}/${basePrefix}_merged_$timestamp.ts'.replaceAll('\\', '/');
+//       try{
+//         final taggedFile = await singleFile.rename(taggedPath);
+//         return taggedFile.path;
+//       } catch (e) {
+//         debugPrint("Failed to create tagged file: $e");
+//       }
+//       return singleFile.path;
+//     }
+
+//     // Build the concat list file required by ffmpeg's concat demuxer
+//     final timestamp = DateTime.now().millisecondsSinceEpoch;
+//     final concatListPath = '${dir.path}/concat_list_$timestamp.txt';
+//     final concatListFile = File(concatListPath);
+
+//     final buffer = StringBuffer();
+//     for (var file in matchedFiles) {
+//       // ffmpeg concat file format requires escaped single quotes
+//       final escapedPath = file.path.replaceAll("'", r"'\''");
+//       buffer.writeln("file '$escapedPath'");
+//     }
+//     await concatListFile.writeAsString(buffer.toString());
+
+//     final mergedPath = '${dir.path}/${basePrefix}_merged_$timestamp.ts'
+//         .replaceAll('\\', '/');
+
+//     final command =
+//         '-y -f concat -safe 0 -i "$concatListPath" -c copy "$mergedPath"';
+
+//     final session = await FFmpegKit.execute(command);
+//     final returnCode = await session.getReturnCode();
+
+//     // Clean up the concat list file regardless of outcome
+//     if (await concatListFile.exists()) {
+//       await concatListFile.delete();
+//     }
+
+//     if (returnCode != null && returnCode.isValueSuccess()) {
+//       final mergedFile = File(mergedPath);
+//       if (mergedFile.existsSync() && mergedFile.lengthSync() > 0) {
+//         // Delete original chunks now that merge succeeded
+//         for (var file in matchedFiles) {
+//           try {
+//             await file.delete();
+//           } catch (e) {
+//             debugPrint("Failed to delete chunk ${file.path}: $e");
+//           }
+//         }
+//         return mergedPath;
+//       }
+//     }
+
+//     debugPrint("Merge failed, falling back to latest chunk.");
+//     return matchedFiles.last.path;
+//   } catch (e) {
+//     debugPrint("Merge error: $e");
+//     return null;
+//   }
+// }
+
+//   Future<void> _startOrResumeRecording({VoidCallback? updateDialog}) async {
+//     final s = session;
+//     if (s.isRecording && !s.isPaused) return;
+
+//     try {
+//       if (Platform.isAndroid) {
+//         if (await FlutterForegroundTask.checkNotificationPermission() !=
+//             NotificationPermission.granted) {
+//           await FlutterForegroundTask.requestNotificationPermission();
+//         }
+//         if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
+//           await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+//         }
+//       }
+
+//       final dir = await getApplicationDocumentsDirectory();
+//       final safeTaskName = widget.taskName
+//           .replaceAll('/', '-')
+//           .replaceAll('\\', '-')
+//           .replaceAll('"', '')
+//           .replaceAll("'", '')
+//           .replaceAll(':', '');
+//           // saample
+//       final safeLabel = widget.label.replaceAll(' ', '_');
+
+//       final basePrefix = '$safeTaskName Face ${widget.faceNumber} $safeLabel vid';
+
+//       final startNum = await _getNextSequenceNumber(dir.path, basePrefix);
+//       final segmentPattern = '${dir.path}/${basePrefix}_%03d.ts'.replaceAll(
+//         '\\',
+//         '/',
+//       );
+
+//       if (Platform.isAndroid && !await FlutterForegroundTask.isRunningService) {
+//         await FlutterForegroundTask.startService(
+//           notificationTitle: 'Vivid GCS Recording',
+//           notificationText: 'Background stream active...',
+//           callback: startCallback,
+//         );
+//       }
+
+//       s.url = widget.url;
+//       if (!s.isRecording) s.startNum = startNum;
+//       s.chunkStartTime = DateTime.now();
+//       s.isRecording = true;
+//       s.isPaused = false;
+//       _isRecording.value = true;
+//       _isPaused.value = false;
+
+//       // START THE AUTO-HEALER
+//       _spawnFFmpegProcess(s, segmentPattern, startNum);
+
+//       if (mounted) {
+//         ScaffoldMessenger.of(context).showSnackBar(
+//           SnackBar(
+//             content: Text(
+//               'Recording Started (Stream Copy Active)',
+//               style: GoogleFonts.jetBrainsMono(fontSize: 12),
+//             ),
+//             backgroundColor: AppTheme.green,
+//           ),
+//         );
+//       }
+//       updateDialog?.call();
+
+//       // Trigger an immediate scan 2 seconds later so it pops up in the UI quickly
+//       Future.delayed(const Duration(seconds: 2), () {
+//         if (mounted) _registerCompletedChunks(onlyFinished: true);
+//       });
+//     } catch (e) {
+//       if (mounted) {
+//         ScaffoldMessenger.of(context).showSnackBar(
+//           SnackBar(content: Text('Failed: $e'), backgroundColor: AppTheme.red),
+//         );
+//       }
+//     }
+//   }
+
+//   void _spawnFFmpegProcess(
+//     RecordSessionState s,
+//     String segmentPattern,
+//     int currentStartNum,
+//   ) async {
+//     if (!s.isRecording || s.isPaused) return;
+
+//     // -stimeout 10000000 (10 seconds) prevents instant crashes.
+//     // -c:v copy (Stream Copy) prevents the CPU from melting and failing the render.
+//     final command =
+
+//     // saamplee
+//     '-y -timeout 10000000 -i "${widget.url}" '
+//     '-c:v copy -an '
+//     // instead of 15 mins given for 24hrs in sec 86400
+//     '-fflags +genpts -f segment -segment_time 86400 -segment_start_number $currentStartNum -reset_timestamps 1 "$segmentPattern"';
+
+//     s.session = await FFmpegKit.executeAsync(command, (finishedSession) async {
+//       if (s.isRecording && !s.isPaused) {
+//         debugPrint(
+//           " RTSP STREAM HUNG! FFmpeg timed out. Auto-healing in 2 seconds...",
+//         );
+
+//         await Future.delayed(const Duration(seconds: 2));
+
+//         final dir = await getApplicationDocumentsDirectory();
+//         final safeTaskName = widget.taskName
+//             .replaceAll('/', '-')
+//             .replaceAll('\\', '-')
+//             .replaceAll('"', '')
+//             .replaceAll("'", '')
+//             .replaceAll(':', '');
+//             // saamplee
+//         final safeLabel = widget.label.replaceAll(' ', '_');
+//         final basePrefix = '$safeTaskName Face ${widget.faceNumber} $safeLabel vid';
+//         final nextNum = await _getNextSequenceNumber(dir.path, basePrefix);
+                       
+//         _spawnFFmpegProcess(s, segmentPattern, nextNum);
+//       }
+//     });
+//   }
+
+//   Future<void> _pauseRecording({VoidCallback? updateDialog}) async {
+//     final s = session;
+//     if (s.session != null) {
+//       await FFmpegKit.cancel(s.session!.getSessionId());
+//       s.session = null;
+//     }
+
+//     if (s.chunkStartTime != null) {
+//       s.accumulatedTime += DateTime.now().difference(s.chunkStartTime!);
+//     }
+//     s.isPaused = true;
+//     _isPaused.value = true;
+
+//     if (mounted) {
+//       ScaffoldMessenger.of(context).showSnackBar(
+//         SnackBar(
+//           content: Text(
+//             'Recording Paused. Finalizing chunk...',
+//             style: GoogleFonts.jetBrainsMono(fontSize: 12),
+//           ),
+//           backgroundColor: AppTheme.amber,
+//         ),
+//       );
+//     }
+//     await Future.delayed(const Duration(milliseconds: 200));
+//     await _registerCompletedChunks(onlyFinished: true);
+//     updateDialog?.call();
+//   }
+//   bool _isStopping = false;
+
+//   Future<void> _stopEntirely({VoidCallback? updateDialog}) async {
+//     // sample1
+//     if(_isStopping) return;
+//     _isStopping = true;
+//     try {
+//       final s = session;
+//       // saamplee
+//       s.isRecording = false;
+//       s.isPaused = false;
+//       if (s.session != null) {
+//         await FFmpegKit.cancel(s.session!.getSessionId());
+//       }
+
+//       GlobalRecordingManager.sessions.remove(widget.label);
+//       if (!GlobalRecordingManager.sessions.values.any(
+//         (sess) => sess.isRecording,
+//       )) {
+//         await FlutterForegroundTask.stopService();
+//       }
+
+//       _isRecording.value = false;
+//       _isPaused.value = false;
+//       _timerText.value = "00:00:00";
+
+//       if (mounted) {
+//         ScaffoldMessenger.of(context).showSnackBar(
+//           SnackBar(
+//             content: Text(
+//               'Merging Video Chunks...',
+//               style: GoogleFonts.jetBrainsMono(
+//                 fontSize: 12,
+//                 color: AppTheme.textHi,
+//               ),
+//             ),
+//             backgroundColor: AppTheme.amber,
+//             duration: const Duration(seconds: 1),
+//           ),
+//         );
         
-      }
-      await Future.delayed(const Duration(milliseconds: 1500));
-      await _registerCompletedChunks(onlyFinished: false);
+//       }
+//       await Future.delayed(const Duration(milliseconds: 1500));
+// // merge all chunks into a single file
+//       final mergedPath = await _mergeChunksIntoSingleFile();
 
-      if (mounted) {
-        await showDialog<void>(
-          context: context,
-          barrierDismissible: false,
-          builder: (dialogContext) {
-            return AlertDialog(
-              backgroundColor: AppTheme.bgPanel,
-              title: Text(
-                'Recording Finished',
-                style: TextStyle(color: AppTheme.textHi),
-              ),
-              content: Text(
-                'Save this recording to the database?',
-                style: TextStyle(color: AppTheme.textMid),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () async {
-                    Navigator.pop(dialogContext);
-                    // path
-                    final savedPath = await _getLatestCompletedRecordingPath();
-                    if (savedPath != null) {
-                      widget.onVideoRecorded?.call(
-                        savedPath,
-                        DateTime.now(),
-                        widget.label,
-                      );
-                    } else {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('No completed recording file found.'),
-                          ),
-                        );
-                      }
-                    }
-                  },
-                  child: Text(
-                    'SAVE TO DB',
-                    style: TextStyle(color: AppTheme.cyan),
-                  ),
-                ),
-                TextButton(
-                  onPressed: () {
-                    Navigator.pop(dialogContext);
-                  },
-                  child: Text(
-                    'CANCEL',
-                    style: TextStyle(color: AppTheme.textMid),
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error stopping video: $e'),
-            backgroundColor: AppTheme.red,
-          ),
-        );
-      }
-    }
-    updateDialog?.call();
-  }
+//       if (mounted) {
+//         await showDialog<void>(
+//           context: context,
+//           barrierDismissible: false,
+//           builder: (dialogContext) {
+//             return AlertDialog(
+//               backgroundColor: AppTheme.bgPanel,
+//               title: Text(
+//                 'Recording Finished',
+//                 style: TextStyle(color: AppTheme.textHi),
+//               ),
+//               content: Text(
+//                 'Save this recording to the database?',
+//                 style: TextStyle(color: AppTheme.textMid),
+//               ),
+//               actions: [
+//                 TextButton(
+//                   onPressed: () {
+//                     Navigator.pop(dialogContext);
+//                     if (mergedPath != null) {
+//                       widget.onVideoRecorded?.call(
+//                         mergedPath,
+//                         DateTime.now(),
+//                         widget.label,
+//                       );
+//                     } else {
+//                       if (mounted) {
+//                         ScaffoldMessenger.of(context).showSnackBar(
+//                           const SnackBar(
+//                             content: Text('No completed recording file found.'),
+//                           ),
+//                         );
+//                       }
+//                     }
+//                   },
+//                   child: Text(
+//                     'SAVE TO DB',
+//                     style: TextStyle(color: AppTheme.cyan),
+//                   ),
+//                 ),
+//                 TextButton(
+//                   onPressed: () {
+//                     Navigator.pop(dialogContext);
+//                   },
+//                   child: Text(
+//                     'CANCEL',
+//                     style: TextStyle(color: AppTheme.textMid),
+//                   ),
+//                 ),
+//               ],
+//             );
+//           },
+//         );
+//       }
+//     }  catch (e) {
+//       if (mounted) {
+//         ScaffoldMessenger.of(context).showSnackBar(
+//           SnackBar(
+//             content: Text('Error stopping video: $e'),
+//             backgroundColor: AppTheme.red,
+//           ),
+//         );
+//       }
+//     }
+//     finally{
+//       _isStopping = false;
+//     }
+//     updateDialog?.call();
+//   }
 
-  Future<void> _takeSnapshot(
-    ScreenshotController targetController, {
-    VoidCallback? updateDialog,
-  }) async {
-    if (_isTakingSnap || !_isStreamReady) return;
-    _isTakingSnap = true;
-    if (mounted) setState(() {});
-    updateDialog?.call();
+//   Future<void> _takeSnapshot(
+//     ScreenshotController targetController, {
+//     VoidCallback? updateDialog,
+//   }) async {
+//     if (_isTakingSnap || !_isStreamReady) return;
+//     _isTakingSnap = true;
+//     if (mounted) setState(() {});
+//     updateDialog?.call();
 
-    try {
-      final bytes = await targetController.capture(pixelRatio: 4.0);
-      if (bytes != null) {
-        final dir = await getApplicationDocumentsDirectory();
-        final timestamp = DateTime.now();
-        final filePath =
-            '${dir.path}/snap_${timestamp.millisecondsSinceEpoch}.png';
-        await File(filePath).writeAsBytes(bytes);
+//     try {
+//       final bytes = await targetController.capture(pixelRatio: 4.0);
+//       if (bytes != null) {
+//         final dir = await getApplicationDocumentsDirectory();
+//         final timestamp = DateTime.now();
+//         final filePath =
+//             '${dir.path}/snap_${timestamp.millisecondsSinceEpoch}.png';
+//         await File(filePath).writeAsBytes(bytes);
 
-        _isTakingSnap = false;
-        if (mounted) setState(() {});
-        updateDialog?.call();
+//         _isTakingSnap = false;
+//         if (mounted) setState(() {});
+//         updateDialog?.call();
 
-        if (mounted) {
-          bool isIssue = false;
-          TextEditingController descCtrl = TextEditingController();
-          await showDialog(
-            context: context,
-            barrierDismissible: false,
-            builder: (ctx) => StatefulBuilder(
-              builder: (context, setModalState) => AlertDialog(
-                backgroundColor: AppTheme.bgPanel,
-                title: Text(
-                  'Snapshot Captured',
-                  style: TextStyle(color: AppTheme.textHi),
-                ),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SwitchListTile(
-                      title: Text(
-                        'Flag as Maintenance Issue?',
-                        style: TextStyle(color: AppTheme.textMid, fontSize: 12),
-                      ),
-                      activeColor: AppTheme.red,
-                      value: isIssue,
-                      onChanged: (v) => setModalState(() => isIssue = v),
-                    ),
-                    if (isIssue)
-                      TextField(
-                        controller: descCtrl,
-                        style: TextStyle(color: AppTheme.textHi, fontSize: 12),
-                        decoration: InputDecoration(
-                          hintText: "Describe the damage/issue....",
-                          hintStyle: TextStyle(color: AppTheme.textLo),
-                        ),
-                      ),
-                  ],
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      widget.onSnapshot?.call(
-                        filePath,
-                        timestamp,
-                        widget.label,
-                        isIssue,
-                        descCtrl.text,
-                      );
-                    },
-                    child: Text(
-                      'SAVE TO DB',
-                      style: TextStyle(color: AppTheme.cyan),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      _isTakingSnap = false;
-      if (mounted) setState(() {});
-      updateDialog?.call();
-    }
-  }
+//         if (mounted) {
+//           bool isIssue = false;
+//           TextEditingController descCtrl = TextEditingController();
+//           await showDialog(
+//             context: context,
+//             barrierDismissible: false,
+//             builder: (ctx) => StatefulBuilder(
+//               builder: (context, setModalState) => AlertDialog(
+//                 backgroundColor: AppTheme.bgPanel,
+//                 title: Text(
+//                   'Snapshot Captured',
+//                   style: TextStyle(color: AppTheme.textHi),
+//                 ),
+//                 content: Column(
+//                   mainAxisSize: MainAxisSize.min,
+//                   children: [
+//                     SwitchListTile(
+//                       title: Text(
+//                         'Flag as Maintenance Issue?',
+//                         style: TextStyle(color: AppTheme.textMid, fontSize: 12),
+//                       ),
+//                       activeColor: AppTheme.red,
+//                       value: isIssue,
+//                       onChanged: (v) => setModalState(() => isIssue = v),
+//                     ),
+//                     if (isIssue)
+//                       TextField(
+//                         controller: descCtrl,
+//                         style: TextStyle(color: AppTheme.textHi, fontSize: 12),
+//                         decoration: InputDecoration(
+//                           hintText: "Describe the damage/issue....",
+//                           hintStyle: TextStyle(color: AppTheme.textLo),
+//                         ),
+//                       ),
+//                   ],
+//                 ),
+//                 actions: [
+//                   TextButton(
+//                     onPressed: () {
+//                       Navigator.pop(ctx);
+//                       widget.onSnapshot?.call(
+//                         filePath,
+//                         timestamp,
+//                         widget.label,
+//                         isIssue,
+//                         descCtrl.text,
+//                       );
+//                     },
+//                     child: Text(
+//                       'SAVE TO DB',
+//                       style: TextStyle(color: AppTheme.cyan),
+//                     ),
+//                   ),
+//                 ],
+//               ),
+//             ),
+//           );
+//         }
+//       }
+//     } catch (e) {
+//       _isTakingSnap = false;
+//       if (mounted) setState(() {});
+//       updateDialog?.call();
+//     }
+//   }
 
-  Widget _buildRecordingControls(VoidCallback updateState) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: _isRecording,
-      builder: (context, isRec, _) {
-        return ValueListenableBuilder<bool>(
-          valueListenable: _isPaused,
-          builder: (context, isPau, _) {
-            return Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!isRec && !isPau)
-                  GestureDetector(
-                    onTap: () =>
-                        _startOrResumeRecording(updateDialog: updateState),
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: const BoxDecoration(
-                        color: Colors.black54,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.videocam_rounded,
-                        color: Colors.white,
-                        size: 16,
-                      ),
-                    ),
-                  )
-                else ...[
-                  GestureDetector(
-                    onTap: () => _stopEntirely(updateDialog: updateState),
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: const BoxDecoration(
-                        color: Colors.black54,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        Icons.stop_rounded,
-                        color: AppTheme.red,
-                        size: 16,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  GestureDetector(
-                    onTap: () {
-                      if (isRec && !isPau) {
-                        _pauseRecording(updateDialog: updateState);
-                      } else {
-                        _startOrResumeRecording(updateDialog: updateState);
-                      }
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: isPau ? AppTheme.amber : Colors.white,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        isPau ? Icons.play_arrow_rounded : Icons.pause_rounded,
-                        color: Colors.black,
-                        size: 16,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
+//   Widget _buildRecordingControls(VoidCallback updateState) {
+//     return ValueListenableBuilder<bool>(
+//       valueListenable: _isRecording,
+//       builder: (context, isRec, _) {
+//         return ValueListenableBuilder<bool>(
+//           valueListenable: _isPaused,
+//           builder: (context, isPau, _) {
+//             return Row(
+//               mainAxisSize: MainAxisSize.min,
+//               children: [
+//                 if (!isRec && !isPau)
+//                   GestureDetector(
+//                     onTap: () =>
+//                         _startOrResumeRecording(updateDialog: updateState),
+//                     child: Container(
+//                       padding: const EdgeInsets.all(8),
+//                       decoration: const BoxDecoration(
+//                         color: Colors.black54,
+//                         shape: BoxShape.circle,
+//                       ),
+//                       child: const Icon(
+//                         Icons.videocam_rounded,
+//                         color: Colors.white,
+//                         size: 16,
+//                       ),
+//                     ),
+//                   )
+//                 else ...[
+//                   GestureDetector(
+//                     onTap: () => _stopEntirely(updateDialog: updateState),
+//                     child: Container(
+//                       padding: const EdgeInsets.all(8),
+//                       decoration: const BoxDecoration(
+//                         color: Colors.black54,
+//                         shape: BoxShape.circle,
+//                       ),
+//                       child: Icon(
+//                         Icons.stop_rounded,
+//                         color: AppTheme.red,
+//                         size: 16,
+//                       ),
+//                     ),
+//                   ),
+//                   const SizedBox(width: 10),
+//                   GestureDetector(
+//                     onTap: () {
+//                       if (isRec && !isPau) {
+//                         _pauseRecording(updateDialog: updateState);
+//                       } else {
+//                         _startOrResumeRecording(updateDialog: updateState);
+//                       }
+//                     },
+//                     child: Container(
+//                       padding: const EdgeInsets.all(8),
+//                       decoration: BoxDecoration(
+//                         color: isPau ? AppTheme.amber : Colors.white,
+//                         shape: BoxShape.circle,
+//                       ),
+//                       child: Icon(
+//                         isPau ? Icons.play_arrow_rounded : Icons.pause_rounded,
+//                         color: Colors.black,
+//                         size: 16,
+//                       ),
+//                     ),
+//                   ),
+//                 ],
+//               ],
+//             );
+//           },
+//         );
+//       },
+//     );
+//   }
 
-  void _showFloatingScreen() {
-    if (controller == null) return;
-    showGeneralDialog(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.95),
-      barrierDismissible: true,
-      barrierLabel: 'LiveFeed',
-      transitionDuration: const Duration(milliseconds: 250),
-      pageBuilder: (ctx, anim1, anim2) {
-        return SafeArea(
-          child: Scaffold(
-            backgroundColor: Colors.transparent,
-            body: StatefulBuilder(
-              builder: (context, setDialogState) {
-                return Stack(
-                  children: [
-                    Center(
-                      child: AspectRatio(
-                        aspectRatio: 16 / 9,
-                        child: Screenshot(
-                          controller: _fsController,
-                          child: (_isStreamReady && controller != null)
-                              ? Video(
-                                  controller: controller!,
-                                  fit: BoxFit.contain,
-                                  controls: NoVideoControls,
-                                )
-                              : Center(
-                                  child: CircularProgressIndicator(
-                                    color: AppTheme.cyan,
-                                  ),
-                                ),
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      top: 16,
-                      right: 16,
-                      child: IconButton(
-                        icon: const Icon(
-                          Icons.close_rounded,
-                          color: Colors.white,
-                          size: 36,
-                        ),
-                        onPressed: () => Navigator.pop(ctx),
-                      ),
-                    ),
-                    Positioned(
-                      top: 24,
-                      left: 24,
-                      child: Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: AppTheme.bgCard.withOpacity(0.8),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: AppTheme.cyan),
-                            ),
-                            child: Text(
-                              '${widget.label} (LIVE)',
-                              style: GoogleFonts.jetBrainsMono(
-                                color: AppTheme.cyan,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
+//   void _showFloatingScreen() {
+//     if (controller == null) return;
+//     showGeneralDialog(
+//       context: context,
+//       barrierColor: Colors.black.withOpacity(0.95),
+//       barrierDismissible: true,
+//       barrierLabel: 'LiveFeed',
+//       transitionDuration: const Duration(milliseconds: 250),
+//       pageBuilder: (ctx, anim1, anim2) {
+//         return SafeArea(
+//           child: Scaffold(
+//             backgroundColor: Colors.transparent,
+//             body: StatefulBuilder(
+//               builder: (context, setDialogState) {
+//                 return Stack(
+//                   children: [
+//                     Center(
+//                       child: AspectRatio(
+//                         aspectRatio: 16 / 9,
+//                         child: Screenshot(
+//                           controller: _fsController,
+//                           child: (_isStreamReady && controller != null)
+//                               ? Video(
+//                                   controller: controller!,
+//                                   fit: BoxFit.contain,
+//                                   controls: NoVideoControls,
+//                                 )
+//                               : Center(
+//                                   child: CircularProgressIndicator(
+//                                     color: AppTheme.cyan,
+//                                   ),
+//                                 ),
+//                         ),
+//                       ),
+//                     ),
+//                     Positioned(
+//                       top: 16,
+//                       right: 16,
+//                       child: IconButton(
+//                         icon: const Icon(
+//                           Icons.close_rounded,
+//                           color: Colors.white,
+//                           size: 36,
+//                         ),
+//                         onPressed: () => Navigator.pop(ctx),
+//                       ),
+//                     ),
+//                     Positioned(
+//                       top: 24,
+//                       left: 24,
+//                       child: Row(
+//                         children: [
+//                           Container(
+//                             padding: const EdgeInsets.symmetric(
+//                               horizontal: 12,
+//                               vertical: 6,
+//                             ),
+//                             decoration: BoxDecoration(
+//                               color: AppTheme.bgCard.withOpacity(0.8),
+//                               borderRadius: BorderRadius.circular(6),
+//                               border: Border.all(color: AppTheme.cyan),
+//                             ),
+//                             child: Text(
+//                               '${widget.label} (LIVE)',
+//                               style: GoogleFonts.jetBrainsMono(
+//                                 color: AppTheme.cyan,
+//                                 fontWeight: FontWeight.bold,
+//                               ),
+//                             ),
+//                           ),
 
-                          ValueListenableBuilder<bool>(
-                            valueListenable: _isRecording,
-                            builder: (context, isRec, _) {
-                              return ValueListenableBuilder<bool>(
-                                valueListenable: _isPaused,
-                                builder: (context, isPau, _) {
-                                  if (!isRec && !isPau) {
-                                    return const SizedBox.shrink();
-                                  }
-                                  return Row(
-                                    children: [
-                                      const SizedBox(width: 12),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                          vertical: 6,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: AppTheme.red.withOpacity(0.8),
-                                          borderRadius: BorderRadius.circular(
-                                            6,
-                                          ),
-                                          border: Border.all(
-                                            color: AppTheme.red,
-                                          ),
-                                        ),
-                                        child: Row(
-                                          children: [
-                                            const Icon(
-                                              Icons.circle,
-                                              color: Colors.white,
-                                              size: 10,
-                                            ),
-                                            const SizedBox(width: 6),
-                                            ValueListenableBuilder<String>(
-                                              valueListenable: _timerText,
-                                              builder: (ctx, time, _) => Text(
-                                                'REC $time',
-                                                style:
-                                                    GoogleFonts.jetBrainsMono(
-                                                      color: Colors.white,
-                                                      fontWeight:
-                                                          FontWeight.bold,
-                                                    ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      if (isPau) ...[
-                                        const SizedBox(width: 12),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 12,
-                                            vertical: 6,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: AppTheme.amber.withOpacity(
-                                              0.8,
-                                            ),
-                                            borderRadius: BorderRadius.circular(
-                                              6,
-                                            ),
-                                            border: Border.all(
-                                              color: AppTheme.amber,
-                                            ),
-                                          ),
-                                          child: Text(
-                                            'PAUSED',
-                                            style: GoogleFonts.jetBrainsMono(
-                                              color: Colors.black,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ],
-                                  );
-                                },
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                    Positioned(
-                      bottom: 30,
-                      right: 30,
-                      child: Row(
-                        children: [
-                          Transform.scale(
-                            scale: 1.5,
-                            child: _buildRecordingControls(
-                              () => setDialogState(() {}),
-                            ),
-                          ),
-                          const SizedBox(width: 40),
-                          GestureDetector(
-                            onTap: () => _takeSnapshot(
-                              _fsController,
-                              updateDialog: () => setDialogState(() {}),
-                            ),
-                            child: Container(
-                              padding: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(
-                                color: _isTakingSnap
-                                    ? Colors.grey
-                                    : AppTheme.cyan,
-                                shape: BoxShape.circle,
-                                boxShadow: const [
-                                  BoxShadow(
-                                    color: Colors.black45,
-                                    blurRadius: 8,
-                                  ),
-                                ],
-                              ),
-                              child: _isTakingSnap
-                                  ? const SizedBox(
-                                      width: 28,
-                                      height: 28,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 3,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : const Icon(
-                                      Icons.camera_alt_rounded,
-                                      color: Colors.white,
-                                      size: 28,
-                                    ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-          ),
-        );
-      },
-    );
-  }
+//                           ValueListenableBuilder<bool>(
+//                             valueListenable: _isRecording,
+//                             builder: (context, isRec, _) {
+//                               return ValueListenableBuilder<bool>(
+//                                 valueListenable: _isPaused,
+//                                 builder: (context, isPau, _) {
+//                                   if (!isRec && !isPau) {
+//                                     return const SizedBox.shrink();
+//                                   }
+//                                   return Row(
+//                                     children: [
+//                                       const SizedBox(width: 12),
+//                                       Container(
+//                                         padding: const EdgeInsets.symmetric(
+//                                           horizontal: 12,
+//                                           vertical: 6,
+//                                         ),
+//                                         decoration: BoxDecoration(
+//                                           color: AppTheme.red.withOpacity(0.8),
+//                                           borderRadius: BorderRadius.circular(
+//                                             6,
+//                                           ),
+//                                           border: Border.all(
+//                                             color: AppTheme.red,
+//                                           ),
+//                                         ),
+//                                         child: Row(
+//                                           children: [
+//                                             const Icon(
+//                                               Icons.circle,
+//                                               color: Colors.white,
+//                                               size: 10,
+//                                             ),
+//                                             const SizedBox(width: 6),
+//                                             ValueListenableBuilder<String>(
+//                                               valueListenable: _timerText,
+//                                               builder: (ctx, time, _) => Text(
+//                                                 'REC $time',
+//                                                 style:
+//                                                     GoogleFonts.jetBrainsMono(
+//                                                       color: Colors.white,
+//                                                       fontWeight:
+//                                                           FontWeight.bold,
+//                                                     ),
+//                                               ),
+//                                             ),
+//                                           ],
+//                                         ),
+//                                       ),
+//                                       if (isPau) ...[
+//                                         const SizedBox(width: 12),
+//                                         Container(
+//                                           padding: const EdgeInsets.symmetric(
+//                                             horizontal: 12,
+//                                             vertical: 6,
+//                                           ),
+//                                           decoration: BoxDecoration(
+//                                             color: AppTheme.amber.withOpacity(
+//                                               0.8,
+//                                             ),
+//                                             borderRadius: BorderRadius.circular(
+//                                               6,
+//                                             ),
+//                                             border: Border.all(
+//                                               color: AppTheme.amber,
+//                                             ),
+//                                           ),
+//                                           child: Text(
+//                                             'PAUSED',
+//                                             style: GoogleFonts.jetBrainsMono(
+//                                               color: Colors.black,
+//                                               fontWeight: FontWeight.bold,
+//                                             ),
+//                                           ),
+//                                         ),
+//                                       ],
+//                                     ],
+//                                   );
+//                                 },
+//                               );
+//                             },
+//                           ),
+//                         ],
+//                       ),
+//                     ),
+//                     Positioned(
+//                       bottom: 30,
+//                       right: 30,
+//                       child: Row(
+//                         children: [
+//                           Transform.scale(
+//                             scale: 1.5,
+//                             child: _buildRecordingControls(
+//                               () => setDialogState(() {}),
+//                             ),
+//                           ),
+//                           const SizedBox(width: 40),
+//                           GestureDetector(
+//                             onTap: () => _takeSnapshot(
+//                               _fsController,
+//                               updateDialog: () => setDialogState(() {}),
+//                             ),
+//                             child: Container(
+//                               padding: const EdgeInsets.all(16),
+//                               decoration: BoxDecoration(
+//                                 color: _isTakingSnap
+//                                     ? Colors.grey
+//                                     : AppTheme.cyan,
+//                                 shape: BoxShape.circle,
+//                                 boxShadow: const [
+//                                   BoxShadow(
+//                                     color: Colors.black45,
+//                                     blurRadius: 8,
+//                                   ),
+//                                 ],
+//                               ),
+//                               child: _isTakingSnap
+//                                   ? const SizedBox(
+//                                       width: 28,
+//                                       height: 28,
+//                                       child: CircularProgressIndicator(
+//                                         strokeWidth: 3,
+//                                         color: Colors.white,
+//                                       ),
+//                                     )
+//                                   : const Icon(
+//                                       Icons.camera_alt_rounded,
+//                                       color: Colors.white,
+//                                       size: 28,
+//                                     ),
+//                             ),
+//                           ),
+//                         ],
+//                       ),
+//                     ),
+//                   ],
+//                 );
+//               },
+//             ),
+//           ),
+//         );
+//       },
+//     );
+//   }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _uiTimer?.cancel();
-    _chunkScannerTimer?.cancel();
-    super.dispose();
-  }
+//   @override
+//   void dispose() {
+//     WidgetsBinding.instance.removeObserver(this);
+//     _uiTimer?.cancel();
+//     _chunkScannerTimer?.cancel();
+//     super.dispose();
+//   }
 
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    final hasUrl = widget.url.isNotEmpty;
-    final h = MediaQuery.of(context).size.width >= 600 ? 250.0 : 200.0;
+//   @override
+//   Widget build(BuildContext context) {
+//     super.build(context);
+//     final hasUrl = widget.url.isNotEmpty;
+//     final h = MediaQuery.of(context).size.width >= 600 ? 250.0 : 200.0;
 
-    return GestureDetector(
-      onTap: (hasUrl && !isError) ? _showFloatingScreen : null,
-      child: Container(
-        height: h,
-        decoration: BoxDecoration(
-          color: AppTheme.bgRaised,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: AppTheme.borderDim),
-        ),
-        child: Stack(
-          children: [
-            if (hasUrl && !isError)
-              Screenshot(
-                controller: _smallController,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: (_isStreamReady && controller != null)
-                      ? Video(
-                          controller: controller!,
-                          fit: BoxFit.cover,
-                          controls: NoVideoControls,
-                        )
-                      : Center(
-                          child: CircularProgressIndicator(
-                            color: AppTheme.cyan,
-                          ),
-                        ),
-                ),
-              )
-            else
-              Center(
-                child: Text(
-                  'NO STREAM CONFIGURED',
-                  style: TextStyle(color: AppTheme.red),
-                ),
-              ),
+//     return GestureDetector(
+//       onTap: (hasUrl && !isError) ? _showFloatingScreen : null,
+//       child: Container(
+//         height: h,
+//         decoration: BoxDecoration(
+//           color: AppTheme.bgRaised,
+//           borderRadius: BorderRadius.circular(8),
+//           border: Border.all(color: AppTheme.borderDim),
+//         ),
+//         child: Stack(
+//           children: [
+//             if (hasUrl && !isError)
+//               Screenshot(
+//                 controller: _smallController,
+//                 child: ClipRRect(
+//                   borderRadius: BorderRadius.circular(8),
+//                   child: (_isStreamReady && controller != null)
+//                       ? Video(
+//                           controller: controller!,
+//                           fit: BoxFit.cover,
+//                           controls: NoVideoControls,
+//                         )
+//                       : Center(
+//                           child: CircularProgressIndicator(
+//                             color: AppTheme.cyan,
+//                           ),
+//                         ),
+//                 ),
+//               )
+//             else
+//               Center(
+//                 child: Text(
+//                   'NO STREAM CONFIGURED',
+//                   style: TextStyle(color: AppTheme.red),
+//                 ),
+//               ),
 
-            Positioned(
-              top: 10,
-              left: 10,
-              child: Row(
-                children: [
-                  StatusBadge(
-                    label: hasUrl ? (isError ? 'ERROR' : 'LIVE') : 'OFFLINE',
-                    color: hasUrl
-                        ? (isError ? AppTheme.red : AppTheme.green)
-                        : AppTheme.red,
-                  ),
+//             Positioned(
+//               top: 10,
+//               left: 10,
+//               child: Row(
+//                 children: [
+//                   StatusBadge(
+//                     label: hasUrl ? (isError ? 'ERROR' : 'LIVE') : 'OFFLINE',
+//                     color: hasUrl
+//                         ? (isError ? AppTheme.red : AppTheme.green)
+//                         : AppTheme.red,
+//                   ),
 
-                  ValueListenableBuilder<bool>(
-                    valueListenable: _isRecording,
-                    builder: (context, isRec, _) {
-                      return ValueListenableBuilder<bool>(
-                        valueListenable: _isPaused,
-                        builder: (context, isPau, _) {
-                          if (!isRec && !isPau) return const SizedBox.shrink();
-                          return Row(
-                            children: [
-                              const SizedBox(width: 8),
-                              ValueListenableBuilder<String>(
-                                valueListenable: _timerText,
-                                builder: (ctx, time, _) => StatusBadge(
-                                  label: 'REC $time',
-                                  color: AppTheme.red,
-                                ),
-                              ),
-                              if (isPau) ...[
-                                const SizedBox(width: 8),
-                                StatusBadge(
-                                  label: 'PAUSED',
-                                  color: AppTheme.amber,
-                                ),
-                              ],
-                            ],
-                          );
-                        },
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
-            if (hasUrl && !isError)
-              Positioned(
-                top: 10,
-                right: 10,
-                child: Row(
-                  children: [
-                    _buildRecordingControls(() {}),
-                    const SizedBox(width: 10),
-                    GestureDetector(
-                      onTap: () => _takeSnapshot(_smallController),
-                      child: Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: _isTakingSnap ? Colors.grey : AppTheme.cyan,
-                          shape: BoxShape.circle,
-                        ),
-                        child: _isTakingSnap
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(
-                                Icons.camera_alt_rounded,
-                                color: Colors.white,
-                                size: 16,
-                              ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+//                   ValueListenableBuilder<bool>(
+//                     valueListenable: _isRecording,
+//                     builder: (context, isRec, _) {
+//                       return ValueListenableBuilder<bool>(
+//                         valueListenable: _isPaused,
+//                         builder: (context, isPau, _) {
+//                           if (!isRec && !isPau) return const SizedBox.shrink();
+//                           return Row(
+//                             children: [
+//                               const SizedBox(width: 8),
+//                               ValueListenableBuilder<String>(
+//                                 valueListenable: _timerText,
+//                                 builder: (ctx, time, _) => StatusBadge(
+//                                   label: 'REC $time',
+//                                   color: AppTheme.red,
+//                                 ),
+//                               ),
+//                               if (isPau) ...[
+//                                 const SizedBox(width: 8),
+//                                 StatusBadge(
+//                                   label: 'PAUSED',
+//                                   color: AppTheme.amber,
+//                                 ),
+//                               ],
+//                             ],
+//                           );
+//                         },
+//                       );
+//                     },
+//                   ),
+//                 ],
+//               ),
+//             ),
+//             if (hasUrl && !isError)
+//               Positioned(
+//                 top: 10,
+//                 right: 10,
+//                 child: Row(
+//                   children: [
+//                     _buildRecordingControls(() {}),
+//                     const SizedBox(width: 10),
+//                     GestureDetector(
+//                       onTap: () => _takeSnapshot(_smallController),
+//                       child: Container(
+//                         padding: const EdgeInsets.all(8),
+//                         decoration: BoxDecoration(
+//                           color: _isTakingSnap ? Colors.grey : AppTheme.cyan,
+//                           shape: BoxShape.circle,
+//                         ),
+//                         child: _isTakingSnap
+//                             ? const SizedBox(
+//                                 width: 16,
+//                                 height: 16,
+//                                 child: CircularProgressIndicator(
+//                                   strokeWidth: 2,
+//                                   color: Colors.white,
+//                                 ),
+//                               )
+//                             : const Icon(
+//                                 Icons.camera_alt_rounded,
+//                                 color: Colors.white,
+//                                 size: 16,
+//                               ),
+//                       ),
+//                     ),
+//                   ],
+//                 ),
+//               ),
+//           ],
+//         ),
+//       ),
+//     );
+//   }
+// }
