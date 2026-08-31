@@ -1,0 +1,1126 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_libserialport/flutter_libserialport.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:usb_serial/usb_serial.dart';
+
+import '../../../core/models/task.dart';
+import '../../../core/services/link_manager.dart';
+import '../../../ui/app_theme.dart';
+import '../../../ui/gcs_widgets.dart';
+import 'package:fl_chart/fl_chart.dart';
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TELEMETRY STATE MANAGER
+// ═════════════════════════════════════════════════════════════════════════════
+class WiperTelemetry extends ChangeNotifier {
+  UsbPort? _usbPort;
+  SerialPort? _desktopPort;
+  RawDatagramSocket? _udpSocket;
+  StreamSubscription<UsbEvent>? _usbEventSub;
+  Timer? _watchdog;
+
+  String connectionStatus = 'INITIALIZING...';
+  Color statusColor = AppTheme.amber;
+  bool isConnected = false;
+  DateTime _lastDataTime = DateTime.now();
+  bool _isDisposed = false;
+
+  // ── SYSTEM 1: STABILIZATION ──
+  bool stabFault = false;
+  bool stabLatched = false;
+  int chamberA = 0;
+  int chamberB = 0;
+  int thrusterDc1 = 0;
+  int thrusterDc2 = 0;
+  int impellerDc1 = 0;
+  int impellerDc2 = 0;
+
+  // ── SYSTEM 2: MOTION CONTROL ──
+  bool motionFault = false;
+  bool inMotion = false;
+  int climbSpeed = 0;
+  int altitude = 0;
+  bool capstanFault = false;
+
+  // ── SYSTEM 3: REMOTE CONTROL ──
+  bool rcFault = false;
+  bool rcConnected = false;
+
+  // ── SYSTEM 4: POWER SYSTEM ──
+  bool powerFault = false;
+  bool acSupply = true;
+  bool bus48vFault = false;
+  bool bus24vFault = false;
+  bool bus12vFault = false;
+  bool bus8vFault = false;
+  int batteryPct = 0;
+
+  // ── SYSTEM 5: CLEANING SUB-SYSTEMS ──
+  bool brush1 = false;
+  bool brush2 = false;
+  bool wiper1 = false;
+  bool wiper2 = false;
+  bool pump = false;
+  double waterLvl = 0.0;
+
+  // ── STATISTICS DATA ──
+  double waterUsed = 0.0;
+  double energyConsumed = 0.0;
+  double areaCleaned = 0.0;
+
+  // Chart tracking
+  DateTime? _sessionStart;
+  final List<FlSpot> waterHistory = [];
+  final List<FlSpot> areaHistory = [];
+  final List<FlSpot> energyHistory = [];
+
+  void _recordHistoryPoint() {
+    _sessionStart ??= DateTime.now();
+    final hoursElapsed =
+        DateTime.now().difference(_sessionStart!).inSeconds / 3600.0;
+
+    waterHistory.add(FlSpot(hoursElapsed, waterUsed));
+    areaHistory.add(FlSpot(hoursElapsed, areaCleaned));
+    energyHistory.add(FlSpot(hoursElapsed, energyConsumed));
+  }
+
+  // NEW: Variables for Digital Twin & TTS
+  double robotX = 0.0;
+  double robotY = 0.0;
+  double batteryLevel = 100.0;
+  double waterLevel = 100.0;
+
+  final List<int> _buffer = [];
+
+  void initConnection() {
+    _watchdog = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (isConnected &&
+          DateTime.now().difference(_lastDataTime).inSeconds > 2) {
+        isConnected = false;
+        _safeNotify();
+      }
+    });
+
+    if (Platform.isAndroid && LinkManager.selectedUsbDevice != null) {
+      _usbEventSub = UsbSerial.usbEventStream?.listen((UsbEvent event) {
+        if (event.event == UsbEvent.ACTION_USB_DETACHED) {
+          _closeUsbAndFallbackToAirUnit();
+        }
+      });
+      _tryConnectAndroidUsb(
+        LinkManager.selectedUsbDevice!,
+        LinkManager.selectedBaudRate,
+      ).then((success) {
+        if (!success) _startMockJsonUdp(); // CHANGED FROM _startAirUnitUdp()
+      });
+    } else if ((Platform.isWindows || Platform.isLinux) &&
+        LinkManager.selectedDesktopPort != null) {
+      _tryConnectDesktopSerial(
+        LinkManager.selectedDesktopPort!,
+        LinkManager.selectedBaudRate,
+      ).then((success) {
+        if (!success) _startMockJsonUdp(); // CHANGED FROM _startAirUnitUdp()
+      });
+    } else {
+      _startMockJsonUdp(); // CHANGED FROM _startAirUnitUdp()
+    }
+  }
+
+  void disposeConnection() {
+    _isDisposed = true;
+    _usbPort?.close();
+    if (_desktopPort != null && _desktopPort!.isOpen) _desktopPort!.close();
+    _udpSocket?.close();
+    _usbEventSub?.cancel();
+    _watchdog?.cancel();
+  }
+
+  Future<bool> _tryConnectDesktopSerial(String portName, int baud) async {
+    try {
+      _desktopPort = SerialPort(portName);
+      if (_desktopPort!.openReadWrite()) {
+        _udpSocket?.close();
+        _udpSocket = null;
+
+        await Future.delayed(const Duration(milliseconds: 250));
+
+        try {
+          SerialPortConfig config = _desktopPort!.config;
+          config.baudRate = baud;
+          config.bits = 8;
+          config.stopBits = 1;
+          config.parity = SerialPortParity.none;
+          config.setFlowControl(SerialPortFlowControl.none);
+
+          config.dtr = 1;
+          config.rts = 1;
+
+          _desktopPort!.config = config;
+        } catch (configError) {
+          debugPrint("Serial Config Note: $configError");
+        }
+
+        connectionStatus = 'DESKTOP USB: $portName @ $baud BAUD';
+        statusColor = AppTheme.green;
+        _safeNotify();
+
+        SerialPortReader reader = SerialPortReader(_desktopPort!, timeout: 10);
+        reader.stream.listen(
+          (Uint8List data) {
+            _processMavlinkBytes(data);
+          },
+          onError: (err) {
+            debugPrint("Serial Stream Error: $err");
+          },
+        );
+        return true;
+      } else {
+        debugPrint("Failed to open port: ${SerialPort.lastError}");
+      }
+    } catch (e) {
+      debugPrint("Desktop Serial Error: $e");
+    }
+    return false;
+  }
+
+  Future<bool> _tryConnectAndroidUsb(UsbDevice device, int baud) async {
+    try {
+      _usbPort = await device.create();
+      bool openResult = await _usbPort!.open();
+
+      if (openResult) {
+        _udpSocket?.close();
+        _udpSocket = null;
+
+        await Future.delayed(const Duration(milliseconds: 200));
+
+        await _usbPort!.setPortParameters(
+          baud,
+          UsbPort.DATABITS_8,
+          UsbPort.STOPBITS_1,
+          UsbPort.PARITY_NONE,
+        );
+
+        await Future.delayed(const Duration(milliseconds: 50));
+
+        await _usbPort!.setDTR(true);
+        await _usbPort!.setRTS(true);
+
+        connectionStatus = 'MK32 USB: $baud BAUD';
+        statusColor = AppTheme.green;
+        _safeNotify();
+
+        _usbPort!.inputStream!.listen((Uint8List data) {
+          _processMavlinkBytes(data);
+        });
+        return true;
+      }
+    } catch (e) {
+      debugPrint("USB Serial Error: $e");
+    }
+    return false;
+  }
+
+  void _processMavlinkBytes(Uint8List data) {
+    _buffer.addAll(data);
+
+    while (_buffer.isNotEmpty) {
+      int magic = _buffer[0];
+
+      if (magic != 0xFD && magic != 0xFE) {
+        _buffer.removeAt(0);
+        continue;
+      }
+
+      if (magic == 0xFE) {
+        if (_buffer.length < 6) break;
+        int payloadLen = _buffer[1];
+        int frameLen = 8 + payloadLen;
+
+        if (frameLen > 280) {
+          _buffer.removeAt(0);
+          continue;
+        }
+        if (_buffer.length < frameLen) break;
+
+        int msgId = _buffer[5];
+        if (msgId == 251) {
+          try {
+            _parseNamedValueFloat(_buffer.sublist(6, 6 + payloadLen));
+          } catch (e) {
+            debugPrint("MAVLink v1 Parse Error: $e");
+          }
+        }
+        _buffer.removeRange(0, frameLen);
+      } else if (magic == 0xFD) {
+        if (_buffer.length < 10) break;
+        int payloadLen = _buffer[1];
+        int incompatFlags = _buffer[2];
+        bool hasSignature = (incompatFlags & 0x01) != 0;
+        int frameLen = 12 + payloadLen + (hasSignature ? 13 : 0);
+
+        if (frameLen > 280) {
+          _buffer.removeAt(0);
+          continue;
+        }
+        if (_buffer.length < frameLen) break;
+
+        int msgId = _buffer[7] | (_buffer[8] << 8) | (_buffer[9] << 16);
+        if (msgId == 251) {
+          try {
+            _parseNamedValueFloat(_buffer.sublist(10, 10 + payloadLen));
+          } catch (e) {
+            debugPrint("MAVLink v2 Parse Error: $e");
+          }
+        }
+        _buffer.removeRange(0, frameLen);
+      }
+    }
+  }
+
+  void _closeUsbAndFallbackToAirUnit() {
+    _usbPort?.close();
+    _usbPort = null;
+    _startMockJsonUdp(); 
+  }
+
+  // ── NEW: MOCK JSON UDP LISTENER (SAFE BIND) ──
+  Future<void> _startMockJsonUdp() async {
+    connectionStatus = 'SEARCHING MOCK UDP...';
+    statusColor = AppTheme.amber;
+    _safeNotify();
+
+    _udpSocket?.close();
+    _udpSocket = null;
+
+    try {
+      _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 54321);
+      _udpSocket!.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          Datagram? dg = _udpSocket!.receive();
+          if (dg != null) {
+            if (!connectionStatus.contains('MOCK DATA')) {
+              connectionStatus = 'MOCK DATA LINKED';
+              statusColor = AppTheme.cyan;
+              _safeNotify();
+            }
+            
+            try {
+              String jsonStr = utf8.decode(dg.data);
+              Map<String, dynamic> data = jsonDecode(jsonStr);
+              
+              _lastDataTime = DateTime.now();
+              if (!isConnected) isConnected = true;
+
+              // 1. Core Bot Status
+              batteryPct = (data['battery'] as num).toInt();
+              altitude = (data['position']['z'] as num).toInt();
+              robotX = (data['position']['x'] as num).toDouble();
+              robotY = (data['position']['y'] as num).toDouble();
+              
+              // 2. Convert raw speed (m/s) to Climb Speed (m/min) for UI
+              double rawSpeed = (data['speed'] as num?)?.toDouble() ?? 0.0;
+              climbSpeed = (rawSpeed * 60).toInt(); 
+              
+              // samplee
+              // 3. Update Resources for Statistics Tab
+              waterLvl = (data['water_lvl'] as num?)?.toDouble() ?? waterLvl; 
+              waterUsed = (data['water_used'] as num?)?.toDouble() ?? waterUsed;
+              energyConsumed = (data['energy'] as num?)?.toDouble() ?? energyConsumed;
+              
+              // 4. Update UI toggles
+              String stat = data['status'] ?? 'IDLE';
+              inMotion = stat == 'NAVIGATING' || stat == 'CLEANING' || climbSpeed > 0;
+              brush1 = stat == 'CLEANING';
+              wiper1 = stat == 'CLEANING';
+              pump = stat == 'CLEANING';
+              
+              // ── NEW: STABILIZATION PARSING ──
+              if (data['stabilization'] != null) {
+                final stab = data['stabilization'];
+                chamberA = (stab['chamber_a'] as num?)?.toInt() ?? chamberA;
+                chamberB = (stab['chamber_b'] as num?)?.toInt() ?? chamberB;
+                thrusterDc1 = (stab['thrust_1'] as num?)?.toInt() ?? thrusterDc1;
+                thrusterDc2 = (stab['thrust_2'] as num?)?.toInt() ?? thrusterDc2;
+                impellerDc1 = (stab['impel_1'] as num?)?.toInt() ?? impellerDc1;
+                impellerDc2 = (stab['impel_2'] as num?)?.toInt() ?? impellerDc2;
+                stabLatched = (stab['stab_latched'] as bool?) ?? stabLatched;
+              }
+              _recordHistoryPoint();
+              _safeNotify();
+            } catch (e) {
+              debugPrint("JSON Parse Error: $e");
+            }
+          }
+        }
+      });
+    } catch (e) {
+      String errStr = e.toString().replaceAll('SocketException:', '').trim();
+      if (errStr.length > 20) errStr = errStr.substring(0, 20); 
+      connectionStatus = 'ERR: $errStr';
+      statusColor = AppTheme.red;
+      _safeNotify();
+    }
+  }
+
+  void _parseNamedValueFloat(List<int> payload) {
+    List<int> paddedPayload = List<int>.from(payload);
+    while (paddedPayload.length < 18) {
+      paddedPayload.add(0);
+    }
+
+    ByteData bd = ByteData.view(Uint8List.fromList(paddedPayload).buffer);
+    double value = bd.getFloat32(4, Endian.little);
+
+    String name = String.fromCharCodes(
+      paddedPayload.sublist(8, 18),
+    ).replaceAll('\x00', '').trim();
+
+    _lastDataTime = DateTime.now();
+    if (!isConnected) isConnected = true;
+
+    switch (name) {
+      case 'STAB_FLT':
+        stabFault = value > 0.5;
+        break;
+      case 'STAB_LATCH':
+        stabLatched = value > 0.5;
+        break;
+      case 'CHMBR_A_PA':
+      case 'CHAMB_A':
+        chamberA = value.toInt();
+        break;
+      case 'CHMBR_B_PA':
+      case 'CHAMB_B':
+        chamberB = value.toInt();
+        break;
+      case 'THRUST_1':
+      case 'THRST_1':
+        thrusterDc1 = value.toInt();
+        break;
+      case 'THRUST_2':
+      case 'THRST_2':
+        thrusterDc2 = value.toInt();
+        break;
+      case 'IMPEL_1':
+        impellerDc1 = value.toInt();
+        break;
+      case 'IMPEL_2':
+        impellerDc2 = value.toInt();
+        break;
+      case 'MOTN_FLT':
+        motionFault = value > 0.5;
+        break;
+      case 'MOTION':
+      case 'MOTN_ACTV':
+        inMotion = value > 0.5;
+        break;
+      case 'CLIMB_MS':
+      case 'CLIMB_SPD':
+        climbSpeed = value.toInt();
+        break;
+      case 'ALTITUDE':
+      case 'ALT':
+        altitude = value.toInt();
+        break;
+      case 'CAPSTAN':
+      case 'CAPSTN_FLT':
+        capstanFault = value < 0.5;
+        break;
+      case 'RC_FLT':
+        rcFault = value > 0.5;
+        break;
+      case 'RC_CONN':
+        rcConnected = value > 0.5;
+        break;
+      case 'PWR_FLT':
+        powerFault = value > 0.5;
+        break;
+      case 'PWR_AC':
+        acSupply = value > 0.5;
+        break;
+      case 'BUS_48_FLT':
+        bus48vFault = value > 0.5;
+        break;
+      case 'BUS_24_FLT':
+        bus24vFault = value > 0.5;
+        break;
+      case 'BUS_12_FLT':
+        bus12vFault = value > 0.5;
+        break;
+      case 'BUS_8_FLT':
+        bus8vFault = value > 0.5;
+        break;
+      case 'BATT_V':
+        batteryPct = (((value - 10.5) / 2.1) * 100).clamp(0, 100).toInt();
+        break;
+      case 'BATT_PCT':
+        batteryPct = value.toInt();
+        break;
+      case 'BRUSH_1':
+        brush1 = value > 0.5;
+        break;
+      case 'BRUSH_2':
+        brush2 = value > 0.5;
+        break;
+      case 'WIPER_1':
+        wiper1 = value > 0.5;
+        break;
+      case 'WIPER_2':
+        wiper2 = value > 0.5;
+        break;
+      case 'PUMP':
+        pump = value > 0.5;
+        break;
+      case 'WATER_LVL':
+        waterLvl = value;
+        break;
+      case 'WATER_USD':
+        waterUsed = value;
+        break;
+      case 'ENERGY_KWH':
+        energyConsumed = value;
+        break;
+      case 'AREA_SQFT':
+        areaCleaned = value;
+        break;
+    }
+    _safeNotify();
+  }
+
+  void _safeNotify() {
+    if (!_isDisposed) notifyListeners();
+  }
+
+  void _simulateData() {
+    robotX += 0.5;
+    if (robotX > 100) {
+      robotX = 0;
+      robotY += 5;
+    }
+
+    batteryLevel -= 0.1;
+    waterLevel -= 0.2;
+
+    notifyListeners();
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TACTICAL DASHBOARD UI 
+// ═════════════════════════════════════════════════════════════════════════════
+class TelemetrySection extends StatelessWidget {
+  final Task task;
+  final bool isWide;
+  final WiperTelemetry telemetry;
+
+  const TelemetrySection({
+    super.key,
+    required this.task,
+    required this.isWide,
+    required this.telemetry,
+  });
+
+  String _formatCompact(int val) {
+    String s = val.toString();
+    if (s.length > 4) {
+      if (val > 9999) return '${val ~/ 1000}k';
+      if (val < -999) return '${val ~/ 1000}k';
+    }
+    return s;
+  }
+
+  Widget _buildGroupBox(Widget child) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppTheme.borderDim),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _buildGroupHeader(
+    String title,
+    bool isConnected,
+    bool? isFault,
+    String? badgeLabel,
+    Color? badgeColor,
+  ) {
+    Color headerColor = AppTheme.textMid;
+    if (isConnected) {
+      if (isFault == null) {
+        headerColor = AppTheme.cyan;
+      } else {
+        headerColor = isFault ? AppTheme.red : AppTheme.green;
+      }
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 3),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            title.toUpperCase(),
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              color: headerColor,
+              letterSpacing: 0.5,
+            ),
+          ),
+          if (badgeLabel != null && badgeColor != null) ...[
+            const SizedBox(width: 8),
+            StatusBadge(label: badgeLabel, color: badgeColor),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPowerGroup(WiperTelemetry t) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildGroupHeader(
+          'Power System',
+          t.isConnected,
+          t.powerFault,
+          t.acSupply ? 'AC SUPPLY' : 'BATTERY',
+          t.acSupply ? AppTheme.cyan : AppTheme.amber,
+        ),
+        _buildGroupBox(
+          Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            children: [
+              InnerStatusTile(
+                label: '48V BUS',
+                status: t.bus48vFault ? 'FAULT' : 'OK',
+                icon: Icons.electrical_services_rounded,
+                color: t.bus48vFault ? AppTheme.red : AppTheme.green,
+              ),
+              InnerStatusTile(
+                label: '24V BUS',
+                status: t.bus24vFault ? 'FAULT' : 'OK',
+                icon: Icons.electrical_services_rounded,
+                color: t.bus24vFault ? AppTheme.red : AppTheme.green,
+              ),
+              InnerStatusTile(
+                label: '12V BUS',
+                status: t.bus12vFault ? 'FAULT' : 'OK',
+                icon: Icons.electrical_services_rounded,
+                color: t.bus12vFault ? AppTheme.red : AppTheme.green,
+              ),
+              InnerStatusTile(
+                label: '8V BUS',
+                status: t.bus8vFault ? 'FAULT' : 'OK',
+                icon: Icons.electrical_services_rounded,
+                color: t.bus8vFault ? AppTheme.red : AppTheme.green,
+              ),
+              InnerTeleTile(
+                label: 'BATTERY',
+                value: '${t.batteryPct}',
+                unit: '%',
+                icon: Icons.battery_charging_full_rounded,
+                color: t.batteryPct < 20 ? AppTheme.red : AppTheme.green,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAlertsGroup(Task task, WiperTelemetry t) {
+    final hasAlerts = task.alerts.isNotEmpty;
+    final latestAlert = hasAlerts ? task.alerts.last : null;
+    final isCritical = latestAlert?.type == 'CRITICAL';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildGroupHeader(
+          'System Alerts',
+          t.isConnected,
+          hasAlerts ? true : false,
+          hasAlerts ? 'ACTIVE' : 'CLEAR',
+          hasAlerts
+              ? (isCritical ? AppTheme.red : AppTheme.amber)
+              : AppTheme.green,
+        ),
+        _buildGroupBox(
+          Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(minHeight: 70),
+            child: hasAlerts
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            isCritical
+                                ? Icons.warning_rounded
+                                : Icons.info_outline,
+                            color: isCritical ? AppTheme.red : AppTheme.amber,
+                            size: 16,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              latestAlert!.message ?? 'Unknown Alert',
+                              style: GoogleFonts.jetBrainsMono(
+                                color: AppTheme.textHi,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'TIME: ${latestAlert.timestamp.toString().split('.')[0]}',
+                        style: GoogleFonts.jetBrainsMono(
+                          color: AppTheme.textLo,
+                          fontSize: 9,
+                        ),
+                      ),
+                    ],
+                  )
+                : Center(
+                    child: Text(
+                      'NO ACTIVE ALERTS',
+                      style: GoogleFonts.jetBrainsMono(
+                        color: AppTheme.textLo,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 1.0,
+                      ),
+                    ),
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStabGroup(WiperTelemetry t) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildGroupHeader(
+          'Stabilization System',
+          t.isConnected,
+          t.stabFault,
+          t.stabLatched ? 'LATCHED' : 'UNLATCHED',
+          t.stabLatched ? AppTheme.green : AppTheme.amber,
+        ),
+        _buildGroupBox(
+          Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            children: [
+              InnerTeleTile(
+                label: 'CHAMBER A',
+                value: _formatCompact(t.chamberA),
+                unit: 'HPa',
+                icon: Icons.compress_rounded,
+                color: AppTheme.cyan,
+              ),
+              InnerTeleTile(
+                label: 'CHAMBER B',
+                value: _formatCompact(t.chamberB),
+                unit: 'HPa',
+                icon: Icons.compress_rounded,
+                color: AppTheme.cyan,
+              ),
+              InnerTeleTile(
+                label: 'THRUST 1',
+                value: _formatCompact(t.thrusterDc1),
+                unit: 'RPM',
+                icon: Icons.cyclone_rounded,
+                color: AppTheme.textMid,
+              ),
+              InnerTeleTile(
+                label: 'THRUST 2',
+                value: _formatCompact(t.thrusterDc2),
+                unit: 'RPM',
+                icon: Icons.cyclone_rounded,
+                color: AppTheme.textMid,
+              ),
+              InnerTeleTile(
+                label: 'IMPEL 1',
+                value: _formatCompact(t.impellerDc1),
+                unit: 'RPM',
+                icon: Icons.heat_pump,
+                color: AppTheme.textMid,
+              ),
+              InnerTeleTile(
+                label: 'IMPEL 2',
+                value: _formatCompact(t.impellerDc2),
+                unit: 'RPM',
+                icon: Icons.heat_pump,
+                color: AppTheme.textMid,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMotionGroup(WiperTelemetry t) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildGroupHeader(
+          'Motion Control',
+          t.isConnected,
+          t.motionFault,
+          t.inMotion ? 'IN MOTION' : 'IDLE',
+          t.inMotion ? AppTheme.cyan : AppTheme.textHi,
+        ),
+        _buildGroupBox(
+          Row(
+            children: [
+              InnerTeleTile(
+                label: 'CLIMB SPD',
+                value: '${t.climbSpeed}',
+                unit: 'm/m',
+                icon: Icons.speed_rounded,
+                color: AppTheme.cyan,
+              ),
+              const SizedBox(width: 12),
+              InnerTeleTile(
+                label: 'Altitude',
+                value: '${t.altitude}',
+                unit: 'meters',
+                icon: Icons.speed_rounded,
+                color: AppTheme.cyan,
+              ),
+              const Spacer(),
+              InnerStatusTile(
+                label: 'CAPSTAN',
+                status: t.capstanFault ? 'FAULT' : 'OK',
+                icon: Icons.settings_rounded,
+                color: t.capstanFault ? AppTheme.red : AppTheme.green,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRcGroup(WiperTelemetry t) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildGroupHeader(
+          'Remote Control',
+          t.isConnected,
+          t.rcFault,
+          null,
+          null,
+        ),
+        _buildGroupBox(
+          Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            children: [
+              InnerStatusTile(
+                label: 'RC LINK',
+                status: t.rcConnected ? 'CONN' : 'DISC',
+                icon: Icons.settings_remote_rounded,
+                color: t.rcConnected ? AppTheme.green : AppTheme.textLo,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCleaningGroup(WiperTelemetry t) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildGroupHeader('Cleaning Subs', t.isConnected, null, null, null),
+        _buildGroupBox(
+          Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            children: [
+              InnerStatusTile(
+                label: 'BRUSH 1',
+                status: t.brush1 ? 'RUN' : 'OFF',
+                icon: Icons.change_circle_outlined,
+                color: t.brush1 ? AppTheme.cyan : AppTheme.textHi,
+              ),
+              InnerStatusTile(
+                label: 'BRUSH 2',
+                status: t.brush2 ? 'RUN' : 'OFF',
+                icon: Icons.change_circle_outlined,
+                color: t.brush2 ? AppTheme.cyan : AppTheme.textHi,
+              ),
+              InnerStatusTile(
+                label: 'WIPER 1',
+                status: t.wiper1 ? 'ENG' : 'OFF',
+                icon: Icons.cleaning_services_rounded,
+                color: t.wiper1 ? AppTheme.green : AppTheme.textHi,
+              ),
+              InnerStatusTile(
+                label: 'WIPER 2',
+                status: t.wiper2 ? 'ENG' : 'OFF',
+                icon: Icons.cleaning_services_rounded,
+                color: t.wiper2 ? AppTheme.green : AppTheme.textHi,
+              ),
+              InnerStatusTile(
+                label: 'PUMP',
+                status: t.pump ? 'ON' : 'OFF',
+                icon: Icons.water_rounded,
+                color: t.pump ? AppTheme.cyan : AppTheme.textHi,
+              ),
+              InnerTeleTile(
+                label: 'WATER LVL',
+                value: t.waterLvl.toStringAsFixed(0),
+                unit: '%',
+                icon: Icons.water_drop_rounded,
+                color: t.waterLvl < 20 ? AppTheme.red : AppTheme.cyan,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pad = AppTheme.screenPad(context);
+
+    return AnimatedBuilder(
+      animation: telemetry,
+      builder: (context, _) {
+        final t = telemetry;
+
+        return SingleChildScrollView(
+          padding: EdgeInsets.symmetric(horizontal: pad, vertical: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  StatusBadge(
+                    label: 'LINK: ${t.connectionStatus}',
+                    color: t.statusColor,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: _buildPowerGroup(t)),
+                  const SizedBox(width: 10),
+                  Expanded(child: _buildAlertsGroup(task, t)),
+                ],
+              ),
+              const SizedBox(height: 10),
+
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildStabGroup(t),
+                        const SizedBox(height: 4),
+                        _buildCleaningGroup(t),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildMotionGroup(t),
+                        const SizedBox(height: 10),
+                        _buildRcGroup(t),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// INNER TILES
+// ═════════════════════════════════════════════════════════════════════════════
+class InnerTeleTile extends StatelessWidget {
+  final String label, value, unit;
+  final IconData icon;
+  final Color color;
+
+  const InnerTeleTile({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.unit,
+    required this.icon,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 9, color: color),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 8,
+                color: AppTheme.textHi,
+                letterSpacing: 0.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        GcsMonoValue(value: value, unit: unit, color: color, fontSize: 16),
+      ],
+    );
+  }
+}
+
+class MicroTeleTile extends StatelessWidget {
+  final String label, value, unit;
+  final IconData icon;
+  final Color color;
+
+  const MicroTeleTile({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.unit,
+    required this.icon,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppTheme.borderDim),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 9, color: color),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: GoogleFonts.jetBrainsMono(
+                  fontSize: 8,
+                  color: AppTheme.textHi,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          GcsMonoValue(value: value, unit: unit, color: color, fontSize: 16),
+        ],
+      ),
+    );
+  }
+}
+
+class InnerStatusTile extends StatelessWidget {
+  final String label, status;
+  final IconData icon;
+  final Color color;
+
+  const InnerStatusTile({
+    super.key,
+    required this.label,
+    required this.status,
+    required this.icon,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 9, color: color),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 8,
+                color: AppTheme.textHi,
+                letterSpacing: 0.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          status,
+          style: GoogleFonts.barlowCondensed(
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+}
