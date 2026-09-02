@@ -1,0 +1,135 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/material.dart';
+import 'package:graphql_flutter/graphql_flutter.dart';
+
+import '../db/isar_service.dart';
+import 'report_service.dart';
+
+class SyncManager {
+  static Future<bool> syncLocalTasksToMaster(BuildContext context) async {
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      debugPrint("SYNC ABORTED: No network connection.");
+      return false;
+    }
+
+    try {
+      final unsyncedTasks = await IsarService.getUnsyncedTasks();
+
+      if (unsyncedTasks.isEmpty) {
+        debugPrint("No new data to sync.");
+        return true;
+      }
+
+      List<Map<String, dynamic>> taskList = [];
+
+      for (var t in unsyncedTasks) {
+        String? base64Pdf;
+        File? reportFile = await ReportService.getLatestReport(t);
+
+        if (reportFile != null && await reportFile.exists()) {
+          final bytes = await reportFile.readAsBytes();
+          base64Pdf = base64Encode(bytes);
+        }
+
+        List<Map<String, dynamic>> encodedSnaps = [];
+        for (var snap in t.snapshots) {
+          if (snap.filePath != null) {
+            final file = File(snap.filePath!);
+            if (await file.exists()) {
+              final bytes = await file.readAsBytes();
+              encodedSnaps.add({
+                'imageBase64': base64Encode(bytes),
+                'timestamp': snap.timestamp?.toIso8601String(),
+                'cameraName': snap.cameraName ?? 'Unknown',
+                'isIssue': snap.isIssue,
+                'issueDescription': snap.issueDescription ?? '',
+              });
+            }
+          }
+        }
+
+        // Syncs the metadata only!
+        // Do NOT convert heavy MKV files to Base64 JSON strings.
+        // This prevents the 30-second network timeout and OOM crashes.
+        List<Map<String, dynamic>> videoMetadata = [];
+        for (var vid in t.videos) {
+          if (vid.filePath != null) {
+            final file = File(vid.filePath!);
+
+            if (file.existsSync() && file.lengthSync() > 0) {
+              videoMetadata.add({
+                'timestamp': vid.timestamp?.toIso8601String(),
+                'cameraName': vid.cameraName ?? 'Unknown',
+                // 'videoBase64': base64Encode(bytes), // <-- Removed
+              });
+            } else {
+              debugPrint(
+                "SYNC WARNING: Skipped ghost video file at ${vid.filePath}",
+              );
+            }
+          }
+        }
+
+        taskList.add({
+          'edgeId': t.id,
+          'buildingName': t.buildingName,
+          'buildingHeight': t.buildingHeight,
+          'surfaceArea': t.surfaceArea,
+          'deviceId': t.deviceId,
+          'status': t.status,
+          'sessionDate': t.sessionDate?.toIso8601String(),
+          'areaCovered': t.areaCovered,
+          'waterUsed': t.waterUsed,
+          'energyConsumed': t.energyConsumed,
+          'carbonSaved': t.carbonSaved,
+          'waterSaved': t.waterSaved,
+          'reportBase64': base64Pdf,
+          'snapshots': encodedSnaps,
+          'videos': videoMetadata,
+        });
+      }
+
+      const String syncMutation = r'''
+        mutation SyncTasks($tasks: [TaskInput]!) {
+          syncTasks(tasks: $tasks) {
+            success
+            syncedCount
+          }
+        }
+      ''';
+
+      final client = GraphQLProvider.of(context).value;
+
+      final QueryResult result = await client.mutate(
+        MutationOptions(
+          document: gql(syncMutation),
+          variables: {'tasks': taskList},
+          fetchPolicy: FetchPolicy.networkOnly,
+        ),
+      );
+
+      if (result.hasException) {
+        debugPrint("GraphQL Error: ${result.exception.toString()}");
+        return false;
+      }
+
+      final bool success = result.data?['syncTasks']?['success'] ?? false;
+      final int syncedCount = result.data?['syncTasks']?['syncedCount'] ?? 0;
+
+      if (success) {
+        debugPrint("SYNC SUCCESS: $syncedCount tasks updated on Master DB.");
+        await IsarService.markTasksAsSynced(unsyncedTasks);
+        return true;
+      }
+
+      return false;
+    } catch (e) {
+      debugPrint("Sync Exception: $e");
+      return false;
+    }
+  }
+}
