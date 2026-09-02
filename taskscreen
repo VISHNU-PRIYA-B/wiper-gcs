@@ -1,0 +1,847 @@
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:open_file/open_file.dart';
+import 'package:vivid_mapping_sandbox/core/db/isar_service.dart';
+import 'package:vivid_mapping_sandbox/core/models/mission.dart';
+import 'package:vivid_mapping_sandbox/core/models/task.dart';
+import 'package:vivid_mapping_sandbox/core/services/report_service.dart';
+import 'package:vivid_mapping_sandbox/core/services/sync_manager.dart';
+import 'package:vivid_mapping_sandbox/ui/app_theme.dart';
+import 'package:vivid_mapping_sandbox/ui/gcs_sidebar.dart';
+import 'package:vivid_mapping_sandbox/ui/gcs_widgets.dart';
+
+import 'create_task_screen.dart';
+import 'link_setup_screen.dart';
+import 'wiper_main_screen.dart';
+
+class TasksScreen extends StatefulWidget {
+  const TasksScreen({super.key});
+
+  @override
+  State<TasksScreen> createState() => _TasksScreenState();
+}
+
+class _TasksScreenState extends State<TasksScreen> {
+  int? activeTaskId;
+  List<Task> tasks = [];
+  bool _loading = true;
+  bool _isDescending = false;
+  bool _isNavigating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    // Removed runSync() from here!
+    // The MK32 CPU cannot handle GraphQL network parsing and screen transition
+    // animations simultaneously. This completely destroys the 20-second hang.
+  }
+
+  Future<void> runSync({bool manual = false}) async {
+    if (manual) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Syncing with Master DB...',
+            style: GoogleFonts.jetBrainsMono(fontSize: 12),
+          ),
+          backgroundColor: AppTheme.bgCard,
+          duration: const Duration(seconds: 1),
+        ),
+      );
+    }
+    // sync sample
+    final unsycnedTasks = await IsarService.getUnsyncedTasks();
+    debugPrint("Unsynced tasks count: ${unsycnedTasks.length}");
+
+    bool success = await SyncManager.syncLocalTasksToMaster(context);
+
+    if (manual) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              success ? 'Sync Successful!' : 'Sync Failed or No New Data.',
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 12,
+                color: Colors.white,
+              ),
+            ),
+            backgroundColor: success ? AppTheme.green : AppTheme.amber,
+          ),
+        );
+      }
+    }
+    await _load();
+  }
+
+  void _toggleSort() {
+    setState(() {
+      _isDescending = !_isDescending;
+      _applySort();
+    });
+  }
+
+  void _applySort() {
+    if (_isDescending) {
+      tasks.sort((a, b) => b.id.compareTo(a.id));
+    } else {
+      tasks.sort((a, b) => a.id.compareTo(b.id));
+    }
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final data = await IsarService.getTasks();
+
+    if (mounted) {
+      setState(() {
+        tasks = data;
+        _applySort();
+        _loading = false;
+
+        final runningTask = tasks
+            .where((t) => t.status == 'ACTIVE')
+            .firstOrNull;
+        if (runningTask != null) {
+          activeTaskId = runningTask.id;
+        } else {
+          activeTaskId = null;
+        }
+      });
+    }
+  }
+
+  Future<void> _toggleMission(Task task) async {
+    if (activeTaskId == task.id) {
+      task.status = 'PAUSED';
+      task.isSynced = false;
+      await IsarService.updateTask(task);
+
+      setState(() => activeTaskId = null);
+      _snack('"${task.buildingName}" is paused', AppTheme.amber);
+    } else {
+      if (activeTaskId != null) {
+        _snack(
+          'Another mission is already active. Pause it first!',
+          AppTheme.red,
+        );
+        return;
+      }
+
+      task.status = 'ACTIVE';
+      task.isSynced = false;
+      await IsarService.updateTask(task);
+
+      setState(() => activeTaskId = task.id);
+      _snack('"${task.buildingName}" is started', AppTheme.green);
+
+      final mission = Mission()
+        ..taskId = task.id
+        ..robotId = 'WIPER_BOT';
+      IsarService.startMission(mission);
+    }
+  }
+
+  Future<void> _delete(int id) async {
+    await IsarService.deleteTask(id);
+    await _load();
+  }
+
+  void _snack(String msg, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          msg,
+          style: GoogleFonts.jetBrainsMono(
+            fontSize: 12,
+            color: AppTheme.textHi,
+          ),
+        ),
+        backgroundColor: AppTheme.bgCard,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(6),
+          side: BorderSide(color: color.withOpacity(0.4)),
+        ),
+      ),
+    );
+  }
+
+  List<SidebarItem> _sidebarItems(BuildContext ctx) => [
+    SidebarItem(
+      icon: Icons.water_drop_rounded,
+      label: 'Task List',
+      sublabel: 'Wiper-GCS operations',
+      accent: AppTheme.cyan,
+      onTap: () {},
+    ),
+    SidebarItem(
+      icon: Icons.add_circle_outline_rounded,
+      label: 'New Task',
+      sublabel: 'Create cleaning operation',
+      accent: AppTheme.cyan,
+      onTap: () async {
+        await Navigator.push(
+          ctx,
+          MaterialPageRoute(builder: (_) => const CreateTaskScreen()),
+        );
+        _load();
+        await runSync();
+      },
+    ),
+    SidebarItem(
+      icon: Icons.usb_rounded,
+      label: 'Link Setup',
+      sublabel: 'Configure USB UART',
+      accent: AppTheme.green,
+      onTap: () async {
+        await Navigator.push(
+          ctx,
+          MaterialPageRoute(builder: (_) => const LinkSetupScreen()),
+        );
+      },
+    ),
+    SidebarItem(
+      icon: Icons.arrow_back_rounded,
+      label: 'Bot Select',
+      sublabel: 'Module selector',
+      onTap: () => Navigator.pop(ctx),
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final pad = AppTheme.screenPad(context);
+
+    return GcsScaffold(
+      screenTitle: 'Wiper-GCS Tasks',
+      screenCode: 'WIPER · OPS · MGMT',
+      accentColor: AppTheme.cyan,
+      items: _sidebarItems(context),
+      activeIndex: 0,
+      actions: [
+        IconButton(
+          icon: Icon(
+            _isDescending ? Icons.sort_rounded : Icons.sort_by_alpha_rounded,
+            color: AppTheme.cyan,
+            size: 20,
+          ),
+          tooltip: 'Toggle Sort Order',
+          onPressed: _toggleSort,
+        ),
+        GestureDetector(
+          onTap: () => runSync(manual: true),
+          child: Container(
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: AppTheme.cyanFaint,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: AppTheme.cyan.withOpacity(0.4)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.sync_rounded, color: AppTheme.cyan, size: 15),
+                const SizedBox(width: 5),
+                Text(
+                  'SYNC',
+                  style: GoogleFonts.jetBrainsMono(
+                    fontSize: 10,
+                    color: AppTheme.cyan,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        GestureDetector(
+          onTap: () async {
+            await Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const CreateTaskScreen()),
+            );
+            _load();
+          },
+          child: Container(
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: AppTheme.cyanFaint,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: AppTheme.cyan.withOpacity(0.4)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.add_rounded, color: AppTheme.cyan, size: 15),
+                const SizedBox(width: 5),
+                Text(
+                  'NEW',
+                  style: GoogleFonts.jetBrainsMono(
+                    fontSize: 10,
+                    color: AppTheme.cyan,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+      body: _loading
+          ? Center(
+              child: CircularProgressIndicator(
+                color: AppTheme.cyan,
+                strokeWidth: 1.5,
+              ),
+            )
+          : tasks.isEmpty
+          ? _emptyState()
+          : _taskList(pad),
+    );
+  }
+
+  Widget _emptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              color: AppTheme.bgCard,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppTheme.borderMid),
+            ),
+            child: Icon(
+              Icons.water_drop_outlined,
+              color: AppTheme.textLo,
+              size: 30,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            'NO TASKS FOUND',
+            style: GoogleFonts.barlowCondensed(
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+              color: AppTheme.textMid,
+              letterSpacing: 2,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Create a task to begin a cleaning operation',
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 10,
+              color: AppTheme.textLo,
+            ),
+          ),
+          const SizedBox(height: 24),
+          GcsButton(
+            label: 'Create Task',
+            icon: Icons.add_rounded,
+            onPressed: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const CreateTaskScreen()),
+              );
+              _load();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _taskList(double pad) {
+    final isWide = MediaQuery.of(context).size.width >= 600;
+
+    return RefreshIndicator(
+      color: AppTheme.cyan,
+      backgroundColor: AppTheme.bgCard,
+      onRefresh: _load,
+      child: ListView.separated(
+        padding: EdgeInsets.symmetric(horizontal: pad, vertical: 16),
+        itemCount: tasks.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 10),
+        itemBuilder: (ctx, i) {
+          final task = tasks[i];
+          final isActive = activeTaskId == task.id;
+          final isAnotherActive =
+              activeTaskId != null && activeTaskId != task.id;
+
+          return _TaskCard(
+            task: task,
+            isActive: isActive,
+            isAnotherActive: isAnotherActive,
+            isWide: isWide,
+            onTap: () async {
+              if (_isNavigating) return;
+              setState(() => _isNavigating = true);
+
+              final nav = Navigator.of(context);
+
+              nav.push(
+                PageRouteBuilder(
+                  opaque: false,
+                  barrierDismissible: false,
+                  barrierColor: Colors.black54,
+                  pageBuilder: (_, __, ___) => Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(
+                          color: AppTheme.cyan,
+                          strokeWidth: 2,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'LOADING MISSION...',
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 11,
+                            color: AppTheme.cyan,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+
+              await Future.delayed(const Duration(milliseconds: 80));
+              if (!mounted) return;
+
+              nav.pop();
+              await nav.push(
+                MaterialPageRoute(
+                  builder: (_) =>
+                      WiperMainScreen(task: task, isActive: isActive),
+                ),
+              );
+
+              if (mounted) {
+                setState(() => _isNavigating = false);
+                _load();
+              }
+            },
+            onToggle: () => _toggleMission(task),
+            onDelete: () => _confirmDelete(task),
+          );
+        },
+      ),
+    );
+  }
+
+  void _confirmDelete(Task task) {
+    if (activeTaskId == task.id) {
+      _snack('Cannot delete an active task. Pause it first.', AppTheme.red);
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.bgPanel,
+        title: Text(
+          'Delete Task',
+          style: GoogleFonts.barlowCondensed(
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+            color: AppTheme.textHi,
+          ),
+        ),
+        content: Text(
+          'Delete "${task.buildingName}"?\nThis cannot be undone.',
+          style: GoogleFonts.jetBrainsMono(
+            fontSize: 12,
+            color: AppTheme.textMid,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(
+              'CANCEL',
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 11,
+                color: AppTheme.textMid,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _delete(task.id);
+            },
+            child: Text(
+              'DELETE',
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.red,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Task card ─────────────────────────────────────────────────────────────────
+class _TaskCard extends StatefulWidget {
+  final Task task;
+  final bool isActive;
+  final bool isAnotherActive;
+  final bool isWide;
+  final VoidCallback onTap;
+  final VoidCallback onToggle;
+  final VoidCallback onDelete;
+
+  const _TaskCard({
+    required this.task,
+    required this.isActive,
+    required this.isAnotherActive,
+    required this.isWide,
+    required this.onTap,
+    required this.onToggle,
+    required this.onDelete,
+  });
+
+  @override
+  State<_TaskCard> createState() => _TaskCardState();
+}
+
+class _TaskCardState extends State<_TaskCard> {
+  @override
+  Widget build(BuildContext context) {
+    final accent = widget.isActive ? AppTheme.green : AppTheme.cyan;
+
+    return GestureDetector(
+      onTap: widget.onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppTheme.bgCard,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: widget.isActive
+                ? accent.withOpacity(0.4)
+                : AppTheme.borderDim,
+            width: widget.isActive ? 1.2 : 1,
+          ),
+          boxShadow: widget.isActive
+              ? [
+                  BoxShadow(
+                    color: AppTheme.green.withOpacity(0.06),
+                    blurRadius: 14,
+                    spreadRadius: 1,
+                  ),
+                ]
+              : [],
+        ),
+        child: widget.isWide ? _wideLayout(accent) : _compactLayout(accent),
+      ),
+    );
+  }
+
+  Widget _wideLayout(Color accent) {
+    return Row(
+      children: [
+        _leftBar(accent),
+        const SizedBox(width: 14),
+        _iconBox(accent),
+        const SizedBox(width: 16),
+        Expanded(child: _info(accent)),
+        const SizedBox(width: 16),
+        _actions(accent),
+      ],
+    );
+  }
+
+  Widget _compactLayout(Color accent) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _leftBar(accent),
+            const SizedBox(width: 10),
+            _iconBox(accent),
+            const SizedBox(width: 12),
+            Expanded(child: _titleBlock(accent)),
+            _statusChip(accent),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _specRow(),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(child: _missionToggle(accent)),
+            const SizedBox(width: 8),
+            _reportBtn(accent),
+            const SizedBox(width: 8),
+            _deleteBtn(),
+            const SizedBox(width: 8),
+            _openBtn(accent),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _leftBar(Color accent) => Container(
+    width: 3,
+    height: 52,
+    decoration: BoxDecoration(
+      color: accent,
+      borderRadius: BorderRadius.circular(2),
+    ),
+  );
+
+  Widget _iconBox(Color accent) => Container(
+    width: 42,
+    height: 42,
+    decoration: BoxDecoration(
+      color: accent.withOpacity(0.08),
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(color: accent.withOpacity(0.2)),
+    ),
+    child: Icon(Icons.domain_rounded, color: accent, size: 20),
+  );
+
+  Widget _titleBlock(Color accent) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        widget.task.buildingName ?? 'Unknown Building',
+        style: GoogleFonts.barlowCondensed(
+          fontSize: 16,
+          fontWeight: FontWeight.w700,
+          color: AppTheme.textHi,
+          letterSpacing: 0.5,
+        ),
+        overflow: TextOverflow.ellipsis,
+      ),
+      Text(
+        '#${widget.task.id.toString().padLeft(4, '0')}',
+        style: GoogleFonts.jetBrainsMono(
+          fontSize: 9,
+          color: accent,
+          letterSpacing: 1,
+        ),
+      ),
+    ],
+  );
+
+  Widget _statusChip(Color accent) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+    decoration: BoxDecoration(
+      color: accent.withOpacity(0.08),
+      border: Border.all(color: accent.withOpacity(0.25)),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        PulseDot(color: accent, size: 5, pulse: widget.isActive),
+        const SizedBox(width: 4),
+        Text(
+          widget.isActive ? 'ACTIVE' : 'IDLE',
+          style: GoogleFonts.jetBrainsMono(
+            fontSize: 8,
+            fontWeight: FontWeight.w700,
+            color: accent,
+            letterSpacing: 0.8,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _specRow() => Row(
+    children: [
+      Icon(Icons.height_rounded, size: 11, color: AppTheme.textLo),
+      const SizedBox(width: 4),
+      Text(
+        '${widget.task.buildingHeight} m',
+        style: GoogleFonts.jetBrainsMono(fontSize: 10, color: AppTheme.textMid),
+      ),
+      const SizedBox(width: 14),
+      Icon(Icons.square_foot_rounded, size: 11, color: AppTheme.textLo),
+      const SizedBox(width: 4),
+      Text(
+        '${widget.task.surfaceArea} m²',
+        style: GoogleFonts.jetBrainsMono(fontSize: 10, color: AppTheme.textMid),
+      ),
+    ],
+  );
+
+  Widget _missionToggle(Color accent) {
+    bool isCompleted = widget.task.status == 'COMPLETED';
+    bool disabled = widget.isAnotherActive || isCompleted;
+
+    return GestureDetector(
+      onTap: disabled ? null : widget.onToggle,
+      child: Container(
+        height: 36,
+        decoration: BoxDecoration(
+          color: disabled
+              ? AppTheme.bgPanel
+              : (widget.isActive
+                    ? AppTheme.amber.withOpacity(0.08)
+                    : AppTheme.green.withOpacity(0.08)),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: disabled
+                ? AppTheme.borderDim
+                : (widget.isActive
+                      ? AppTheme.amber.withOpacity(0.3)
+                      : AppTheme.green.withOpacity(0.3)),
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              widget.isActive ? Icons.pause_rounded : Icons.play_arrow_rounded,
+              size: 16,
+              color: disabled
+                  ? AppTheme.textLo
+                  : (widget.isActive ? AppTheme.amber : AppTheme.green),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              widget.isActive ? 'PAUSE' : 'START',
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                color: disabled
+                    ? AppTheme.textLo
+                    : (widget.isActive ? AppTheme.amber : AppTheme.green),
+                letterSpacing: 1,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _reportBtn(Color accent) => GestureDetector(
+    onTap: () async {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Fetching live data & Generating PDF...',
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 12,
+              color: AppTheme.textHi,
+            ),
+          ),
+          backgroundColor: AppTheme.bgCard,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 1),
+        ),
+      );
+
+      final allTasks = await IsarService.getTasks();
+      final latestTask = allTasks
+          .where((t) => t.id == widget.task.id)
+          .firstOrNull;
+      if (latestTask == null) return;
+
+      String? path = await ReportService.generateMissionReport(latestTask);
+
+      if (path != null) {
+        OpenFile.open(path);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Failed to generate report',
+                style: GoogleFonts.jetBrainsMono(
+                  fontSize: 12,
+                  color: Colors.white,
+                ),
+              ),
+              backgroundColor: AppTheme.red,
+            ),
+          );
+        }
+      }
+    },
+    child: Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: accent.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: accent.withOpacity(0.3)),
+      ),
+      child: Icon(Icons.picture_as_pdf_rounded, size: 16, color: accent),
+    ),
+  );
+
+  Widget _deleteBtn() => GestureDetector(
+    onTap: widget.onDelete,
+    child: Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: AppTheme.red.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppTheme.red.withOpacity(0.2)),
+      ),
+      child: Icon(Icons.delete_outline_rounded, size: 16, color: AppTheme.red),
+    ),
+  );
+
+  Widget _openBtn(Color accent) => GestureDetector(
+    onTap: widget.onTap,
+    child: Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: accent.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: accent.withOpacity(0.3)),
+      ),
+      child: Icon(Icons.open_in_new_rounded, size: 16, color: accent),
+    ),
+  );
+
+  Widget _info(Color accent) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [_titleBlock(accent), const SizedBox(height: 6), _specRow()],
+  );
+
+  Widget _actions(Color accent) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      _statusChip(accent),
+      const SizedBox(width: 8),
+      _missionToggle(accent),
+      const SizedBox(width: 8),
+      _reportBtn(accent),
+      const SizedBox(width: 8),
+      _deleteBtn(),
+      const SizedBox(width: 8),
+      _openBtn(accent),
+    ],
+  );
+}
+
+
+
