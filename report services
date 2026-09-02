@@ -1,0 +1,423 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+
+import '../models/task.dart';
+
+class ReportService {
+  static Map<String, double> _calculateCarbonSavings(
+    double botEnergyKwh,
+    double areaCleanedSqft,
+  ) {
+    const double gridEmissionFactor = 0.71;
+    const double gondolaPowerKw = 3.0;
+    const double manualSpeedSqftHr = 150.0;
+
+    double botCarbon = botEnergyKwh * gridEmissionFactor;
+    double manualHours = areaCleanedSqft / manualSpeedSqftHr;
+    double traditionalEnergy = manualHours * gondolaPowerKw;
+    double traditionalCarbon = traditionalEnergy * gridEmissionFactor;
+
+    return {
+      'botCO2': botCarbon,
+      'traditionalCO2': traditionalCarbon,
+      'savedCO2': traditionalCarbon - botCarbon,
+    };
+  }
+
+  static Future<String?> generateMissionReport(Task task) async {
+    try {
+      final pdf = pw.Document();
+
+      // Load Vividobots Logo
+      final imageBytes = await rootBundle.load('lib/assets/image.png');
+      final image = pw.MemoryImage(imageBytes.buffer.asUint8List());
+
+      double area = task.areaCovered ?? 0.0;
+      double water = task.waterUsed ?? 0.0;
+      double energy = task.energyConsumed ?? 0.0;
+      double totalArea = task.surfaceArea ?? 0.0;
+
+      final esgData = _calculateCarbonSavings(energy, area);
+
+      // Date logic
+      DateTime displayDate = task.sessionDate ?? DateTime.now();
+
+      // Changed to pw.Page and pw.Column to force a strict single-page layout
+      pdf.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(32),
+          build: (pw.Context context) {
+            return pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                // ── 1. HEADER ──
+                pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: pw.CrossAxisAlignment.center,
+                  children: [
+                    pw.Image(
+                      image,
+                      height:
+                          65, // Slightly compressed to guarantee single page fit
+                      fit: pw.BoxFit.contain,
+                    ),
+                    pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.end,
+                      children: [
+                        pw.Text(
+                          'Wiperque Task Report',
+                          style: pw.TextStyle(
+                            fontSize: 16,
+                            fontWeight: pw.FontWeight.bold,
+                            color: PdfColors.blueGrey800,
+                          ),
+                        ),
+                        pw.Text(
+                          'DATE: ${displayDate.toString().split('.')[0]}',
+                          style: const pw.TextStyle(
+                            fontSize: 10,
+                            color: PdfColors.grey700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+
+                pw.SizedBox(height: 10),
+                pw.Divider(thickness: 1.5, color: PdfColors.blueGrey200),
+                pw.SizedBox(height: 15),
+
+                // ── 2. DETAILS SECTION ──
+                pw.Text(
+                  'Task Details',
+                  style: pw.TextStyle(
+                    fontSize: 13,
+                    color: PdfColors.black,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                ),
+                pw.SizedBox(height: 8),
+
+                _buildRow("Building:", task.buildingName ?? 'N/A'),
+                _buildRow("Device ID:", task.deviceId ?? 'N/A'),
+                _buildRow("Target Area:", "$totalArea sq.ft"),
+                _buildRow("Session Status:", task.status ?? 'PENDING'),
+
+                pw.SizedBox(height: 20),
+
+                // ── 3. METRICS TABLE ──
+                pw.Text(
+                  'Performance & ESG Metrics',
+                  style: pw.TextStyle(
+                    fontSize: 13,
+                    color: PdfColors.black,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                ),
+                pw.SizedBox(height: 8),
+                pw.TableHelper.fromTextArray(
+                  context: context,
+                  headerStyle: pw.TextStyle(
+                    fontWeight: pw.FontWeight.bold,
+                    color: PdfColors.white,
+                    fontSize: 10,
+                  ),
+                  cellStyle: const pw.TextStyle(fontSize: 10),
+                  headerDecoration: const pw.BoxDecoration(
+                    color: PdfColors.cyan700,
+                  ),
+                  rowDecoration: const pw.BoxDecoration(
+                    border: pw.Border(
+                      bottom: pw.BorderSide(color: PdfColors.grey300),
+                    ),
+                  ),
+                  cellAlignment: pw.Alignment.centerLeft,
+                  data: <List<String>>[
+                    ['Metric', 'Recorded Value', 'Unit'],
+                    ['Area Cleaned', area.toStringAsFixed(1), 'sq.ft'],
+                    ['Water Used', water.toStringAsFixed(1), 'Liters'],
+                    ['Energy Consumed', energy.toStringAsFixed(2), 'kWh'],
+                    [
+                      'Robot CO2 Emission',
+                      esgData['botCO2']!.toStringAsFixed(2),
+                      'kg',
+                    ],
+                    [
+                      'Traditional CO2 Emission',
+                      esgData['traditionalCO2']!.toStringAsFixed(2),
+                      'kg',
+                    ],
+                    [
+                      'Total Carbon Saved',
+                      esgData['savedCO2']!.toStringAsFixed(2),
+                      'kg',
+                    ],
+                  ],
+                ),
+
+                pw.SizedBox(height: 30),
+
+                // ── 4. DATA VISUALIZATION (CHARTS) ──
+                pw.Text(
+                  'Statistics Visualization',
+                  style: pw.TextStyle(
+                    fontSize: 13,
+                    color: PdfColors.black,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                ),
+                pw.SizedBox(height: 10),
+
+                // ROW 1: Area and Water Charts
+                pw.Row(
+                  children: [
+                    pw.Expanded(
+                      child: _buildPerformanceChart(
+                        "Area Cleaned Progress",
+                        task.areaHistoryPersisted,
+                        PdfColors.green700,
+                        "sq.ft",
+                      ),
+                    ),
+                    pw.SizedBox(width: 15),
+                    pw.Expanded(
+                      child: _buildPerformanceChart(
+                        "Water Usage Curve",
+                        task.waterHistoryPersisted,
+                        PdfColors.cyan700,
+                        "Liters",
+                      ),
+                    ),
+                  ],
+                ),
+
+                pw.SizedBox(height: 15),
+
+                // ROW 2: Energy Chart
+                pw.Row(
+                  children: [
+                    pw.Expanded(
+                      child: _buildPerformanceChart(
+                        "Energy Consumption",
+                        task.energyHistoryPersisted,
+                        // PdfColors.amber700,sample
+                        PdfColors.amber700,
+                        "kWh",
+                      ),
+                    ),
+                    pw.SizedBox(width: 15),
+                    pw.Expanded(child: pw.Container()),
+                  ],
+                ),
+
+                // Spacer dynamically pushes the footer to the absolute bottom of the single page
+                pw.Spacer(),
+
+                // ── 5. FOOTER ──
+                pw.Align(
+                  alignment: pw.Alignment.center,
+                  child: pw.Text(
+                    'Generated offline via Vivid GCS v2.0',
+                    style: const pw.TextStyle(
+                      fontSize: 8,
+                      color: PdfColors.grey,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+
+      // Save logic
+      final baseDir = await getApplicationDocumentsDirectory();
+      final reportDir = Directory("${baseDir.path}/VividReports");
+
+      if (!await reportDir.exists()) {
+        await reportDir.create(recursive: true);
+      }
+
+      String safeName = (task.buildingName ?? 'Task_${task.id}')
+          .replaceAll(RegExp(r'[^\w\s]+'), '')
+          .replaceAll(' ', '_');
+
+      int iteration = 1;
+      String filePath = "${reportDir.path}/${safeName}_Report_v$iteration.pdf";
+      File file = File(filePath);
+
+      while (await file.exists()) {
+        iteration++;
+        filePath = "${reportDir.path}/${safeName}_Report_v$iteration.pdf";
+        file = File(filePath);
+      }
+
+      await file.writeAsBytes(await pdf.save());
+
+      return filePath;
+    } catch (e) {
+      debugPrint("🔥 PDF GENERATION ERROR: $e");
+      return null;
+    }
+  }
+
+  // Helper function to grab the latest generated PDF for a specific task
+  static Future<File?> getLatestReport(Task task) async {
+    try {
+      final baseDir = await getApplicationDocumentsDirectory();
+      final reportDir = Directory("${baseDir.path}/VividReports");
+
+      if (!await reportDir.exists()) return null;
+
+      String safeName = (task.buildingName ?? 'Task_${task.id}')
+          .replaceAll(RegExp(r'[^\w\s]+'), '')
+          .replaceAll(' ', '_');
+
+      // Find all files belonging to this specific task
+      List<FileSystemEntity> files = reportDir
+          .listSync()
+          .where((e) => e.path.contains('${safeName}_Report_v'))
+          .toList();
+
+      if (files.isEmpty) return null;
+
+      // Sort files to find the highest iteration number (v3, v2, v1...)
+      files.sort((a, b) {
+        int vA =
+            int.tryParse(a.path.split('_v').last.replaceAll('.pdf', '')) ?? 0;
+        int vB =
+            int.tryParse(b.path.split('_v').last.replaceAll('.pdf', '')) ?? 0;
+        return vB.compareTo(vA); // Sort descending
+      });
+
+      return File(files.first.path); // Returns the newest file!
+    } catch (e) {
+      debugPrint("Error finding report: $e");
+      return null;
+    }
+  }
+
+  // Helper: Key-Value Row
+  static pw.Widget _buildRow(String label, String value) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 4),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(
+            width: 100,
+            child: pw.Text(
+              label,
+              style: pw.TextStyle(
+                // fontWeight: pw.FontWeight.bold,sample
+                fontSize: 10,
+                color: PdfColors.blueGrey800,
+              ),
+            ),
+          ),
+          pw.Expanded(
+            child: pw.Text(value, style: const pw.TextStyle(fontSize: 10)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Helper: Draw PDF Charts
+  static pw.Widget _buildPerformanceChart(
+    String title,
+    List<HistoryPointer> history,
+    PdfColor color,
+    String yAxisLabel,
+  ) {
+    final points = history
+        .map((point) => pw.PointChartValue(point.hour, point.value))
+        .toList();
+
+        final double maxX = points.isNotEmpty
+            ? points.map((p) => p.x).reduce((a, b) => a > b ? a : b)
+            : 0.0;
+        final double maxY = points.isNotEmpty
+            ? points.map((p) => p.y).reduce((a, b) => a > b ? a : b)
+            : 0.0;
+
+    final double safeMaxX = maxX <= 0 ? 1.0 : maxX;
+    final double safeMaxY = maxY <= 0 ? 10.0 : maxY;
+
+    // Keep an empty chart valid while still showing persisted Statistics data.
+    final chartPoints = points.isEmpty
+        ? [const pw.PointChartValue(0, 0)]
+        : points;
+
+    return pw.Container(
+      height: 135,
+      padding: const pw.EdgeInsets.all(10),
+      decoration: pw.BoxDecoration(
+        border: pw.Border.all(color: PdfColors.grey300),
+        borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+      ),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text(
+            title,
+            style: pw.TextStyle(
+              fontSize: 9,
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColors.blueGrey800,
+            ),
+          ),
+          pw.SizedBox(height: 8),
+          pw.Expanded(
+            child: pw.Chart(
+              grid: pw.CartesianGrid(
+                // Added explicit tick marks and number rounding to the grid axes!
+                xAxis: pw.FixedAxis(
+                  [0, safeMaxX * 0.5, safeMaxX],
+                  format: (v) => v.toStringAsFixed(1),
+                  textStyle: const pw.TextStyle(
+                    fontSize: 7,
+                    color: PdfColors.grey700,
+                  ),
+                ),
+                yAxis: pw.FixedAxis(
+                  [0, safeMaxY * 0.5, safeMaxY],
+                  format: (v) => v.toStringAsFixed(1),
+                  textStyle: const pw.TextStyle(
+                    fontSize: 7,
+                    color: PdfColors.grey700,
+                  ),
+                ),
+              ),
+              datasets: [
+                pw.LineDataSet(
+                  drawSurface: true,
+                  isCurved: true,
+                  surfaceOpacity: 0.15,
+                  color: color,
+                  lineWidth: 1.5,
+                  data: [...chartPoints],
+                ),
+              ],
+            ),
+          ),
+          pw.SizedBox(height: 5),
+          pw.Align(
+            alignment: pw.Alignment.center,
+            child: pw.Text(
+              "Task Progress (%) vs $yAxisLabel",
+              style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
