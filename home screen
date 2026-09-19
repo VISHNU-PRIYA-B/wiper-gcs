@@ -1,0 +1,238 @@
+import 'package:flutter/material.dart';
+
+import '../../../core/models/task.dart';
+import '../../../ui/app_theme.dart';
+import '../../../ui/gcs_sidebar.dart';
+import '../../../ui/gcs_widgets.dart';
+import '../sections/telemetry.dart';
+import 'link_setup_screen.dart';
+// Adjust the import path as necessary
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HOME SCREEN — curated at-a-glance dashboard
+// Shows only: Chamber A/B, Thrust 1/2, Impeller 1/2, Brush 1/2, Pump,
+// and the cleaning statistics (Water Used, Area Cleaned, Energy Consumed).
+// ═════════════════════════════════════════════════════════════════════════════
+class HomeScreen extends StatefulWidget {
+  final Task? task;
+
+  const HomeScreen({super.key, this.task});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+
+
+
+
+class _HomeScreenState extends State<HomeScreen> {
+  late final WiperTelemetry _telemetry;
+
+  @override
+  void initState() {
+    super.initState();
+    _telemetry = WiperTelemetry();
+    _telemetry.initConnection();
+  }
+
+  @override
+  void dispose() {
+    _telemetry.disposeConnection();
+    _telemetry.dispose();
+    super.dispose();
+  }
+
+  String _formatCompact(int val) {
+    String s = val.toString();
+    if (s.length > 4) {
+      if (val > 9999) return '${val ~/ 1000}k';
+      if (val < -999) return '${val ~/ 1000}k';
+    }
+    return s;
+  }
+
+  List<SidebarItem> _sidebarItems(BuildContext ctx) => [
+    SidebarItem(
+      icon: Icons.dashboard_rounded,
+      label: 'Home',
+      sublabel: 'Live overview',
+      accent: AppTheme.cyan,
+      onTap: () {},
+    ),
+    SidebarItem(
+      icon: Icons.usb_rounded,
+      label: 'Link Setup',
+      sublabel: 'Configure USB UART',
+      accent: AppTheme.green,
+      onTap: () async {
+        await Navigator.push(
+          ctx,
+          MaterialPageRoute(builder: (_) => const LinkSetupScreen()),
+        );
+      },
+    ),
+    SidebarItem(
+      icon: Icons.arrow_back_rounded,
+      label: 'Back',
+      sublabel: 'Return',
+      onTap: () => Navigator.pop(ctx),
+    ),
+  ];
+
+  Widget _groupBox(String title, Color accent, List<Widget> tiles) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        GcsSectionLabel(title, color: accent),
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppTheme.bgCard,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: AppTheme.borderDim),
+          ),
+          child: Wrap(spacing: 20, runSpacing: 16, children: tiles),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pad = AppTheme.screenPad(context);
+
+    return GcsScaffold(
+      screenTitle: widget.task?.buildingName ?? 'Wiper-GCS Home',
+      screenCode: 'WIPER · HOME · OVERVIEW',
+      accentColor: AppTheme.cyan,
+      items: _sidebarItems(context),
+      activeIndex: 0,
+      body: AnimatedBuilder(
+        animation: _telemetry,
+        builder: (context, _) {
+          final t = _telemetry;
+
+          return SingleChildScrollView(
+            padding: EdgeInsets.symmetric(horizontal: pad, vertical: 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    StatusBadge(
+                      label: 'LINK: ${t.connectionStatus}',
+                      color: t.statusColor,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+
+                _groupBox('Stabilization', AppTheme.cyan, [
+                  InnerTeleTile(
+                    label: 'CHAMBER A',
+                    value: _formatCompact(t.chamberA),
+                    unit: 'HPa',
+                    icon: Icons.compress_rounded,
+                    color: AppTheme.cyan,
+                  ),
+                  InnerTeleTile(
+                    label: 'CHAMBER B',
+                    value: _formatCompact(t.chamberB),
+                    unit: 'HPa',
+                    icon: Icons.compress_rounded,
+                    color: AppTheme.cyan,
+                  ),
+                  InnerTeleTile(
+                    label: 'THRUST 1',
+                    value: _formatCompact(t.thrusterDc1),
+                    unit: 'RPM',
+                    icon: Icons.cyclone_rounded,
+                    color: AppTheme.textMid,
+                  ),
+                  InnerTeleTile(
+                    label: 'THRUST 2',
+                    value: _formatCompact(t.thrusterDc2),
+                    unit: 'RPM',
+                    icon: Icons.cyclone_rounded,
+                    color: AppTheme.textMid,
+                  ),
+                  InnerTeleTile(
+                    label: 'IMPEL 1',
+                    value: _formatCompact(t.impellerDc1),
+                    unit: 'RPM',
+                    icon: Icons.heat_pump,
+                    color: AppTheme.textMid,
+                  ),
+                  InnerTeleTile(
+                    label: 'IMPEL 2',
+                    value: _formatCompact(t.impellerDc2),
+                    unit: "RPM",
+                    icon: Icons.heat_pump,
+                    color: AppTheme.textMid,
+
+
+                  ),
+
+                ]),
+                const SizedBox(height: 20),
+
+                _groupBox('Cleaning Subs', AppTheme.green, [
+                  InnerStatusTile(
+                    label: 'BRUSH 1',
+                    status: t.brush1 ? 'RUN' : 'OFF',
+                    icon: Icons.change_circle_outlined,
+                    color: t.brush1 ? AppTheme.cyan : AppTheme.textHi,
+                  ),
+                  InnerStatusTile(
+                    label: 'BRUSH 2',
+                    status: t.brush2 ? 'RUN' : 'OFF',
+                    icon: Icons.change_circle_outlined,
+                    color: t.brush2 ? AppTheme.cyan : AppTheme.textHi,
+                  ),
+
+                ]),
+                const SizedBox(height: 20),
+
+                _groupBox('Cleaning Statistics', AppTheme.amber, [
+                  InnerTeleTile(
+                    label: 'WATER USED',
+                    value: t.waterUsed.toStringAsFixed(1),
+                    unit: 'L',
+                    icon: Icons.water_drop_rounded,
+                    color: AppTheme.cyan,
+                  ),
+                  InnerTeleTile(
+                    label: 'AREA CLEANED',
+                    value: t.areaCleaned.toStringAsFixed(1),
+                    unit: 'm2',
+                    icon: Icons.square_foot_rounded,
+                    color: AppTheme.green,
+                  ),
+                  InnerTeleTile(
+                    label: 'ENERGY CONSUMED',
+                    value: t.energyConsumed.toStringAsFixed(1),
+                    unit: 'kWh',
+                    icon: Icons.bolt_rounded,
+                    color: AppTheme.amber,
+                  ),
+                  InnerTeleTile(
+                    label: 'WATER USED',
+                    value: t.waterUsed.toStringAsFixed(1),
+                    unit: 'L',
+                    icon: Icons.water_drop_rounded,
+                    color: AppTheme.cyan,
+                  )
+                ]),
+                const SizedBox(height: 24),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
